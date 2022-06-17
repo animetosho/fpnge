@@ -512,20 +512,19 @@ ProcessRow(size_t bytes_per_line_buf, const unsigned char *mask,
       auto a = _mmsi(loadu)((__mivec *)(left_buf + i));
       auto b = _mmsi(load)((__mivec *)(top_buf + i));
       auto c = _mmsi(loadu)((__mivec *)(topleft_buf + i));
-      auto bc = _mm(sub_epi8)(b, c);
-      auto ca = _mm(sub_epi8)(c, a);
-      auto cgeb = _mm(cmpeq_epi8)(c, _mm(max_epu8)(b, c));
-      auto agec = _mm(cmpeq_epi8)(a, _mm(max_epu8)(a, c));
-      auto pa = _mm(blendv_epi8)(bc, _mm(sub_epi8)(c, b), cgeb);
-      auto pb = _mm(blendv_epi8)(ca, _mm(sub_epi8)(a, c), agec);
-      auto bcgeca = _mm(cmpeq_epi8)(_mm(max_epu8)(bc, ca), bc);
-      auto absbcca = _mm(blendv_epi8)(_mm(sub_epi8)(ca, bc),
-                                        _mm(sub_epi8)(bc, ca), bcgeca);
-      auto pc = _mmsi(or)(_mmsi(xor)(agec, cgeb), absbcca);
-      auto use_a =
-          _mmsi(and)(_mm(cmpeq_epi8)(_mm(max_epu8)(pb, pa), pb),
-                           _mm(cmpeq_epi8)(_mm(max_epu8)(pc, pa), pc));
-      auto use_b = _mm(cmpeq_epi8)(_mm(max_epu8)(pb, pc), pc);
+      auto min_bc = _mm(min_epu8)(b, c);
+      auto min_ac = _mm(min_epu8)(a, c);
+      auto pa = _mm(sub_epi8)(_mm(max_epu8)(b, c), min_bc);
+      auto pb = _mm(sub_epi8)(_mm(max_epu8)(a, c), min_ac);
+      auto min_pab = _mm(min_epu8)(pa, pb);
+      auto pc = _mm(sub_epi8)(_mm(max_epu8)(pa, pb), min_pab);
+      pc = _mmsi(or)(pc, _mm(cmpeq_epi8)(
+      	_mm(cmpeq_epi8)(min_bc, b),
+      	_mm(cmpeq_epi8)(min_ac, a)
+      ));
+      
+      auto use_a = _mm(cmpeq_epi8)(_mm(min_epu8)(min_pab, pc), pa);
+      auto use_b = _mm(cmpeq_epi8)(_mm(min_epu8)(pb, pc), pb);
 
       auto pred = _mm(blendv_epi8)(_mm(blendv_epi8)(c, b, use_b), a, use_a);
       _mmsi(store)((__mivec *)predicted_data,
