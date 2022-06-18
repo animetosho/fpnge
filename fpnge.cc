@@ -700,12 +700,9 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   auto nbits_hi = _mm(sub_epi8)(nbits, _mm(set1_epi8)(mid_lo_nbits));
   auto nbits0 = _mm(unpacklo_epi8)(nbits, nbits_hi);
   auto nbits1 = _mm(unpackhi_epi8)(nbits, nbits_hi);
-  const auto nbits_to_mask = _mm(set_epi32)(
-#if SIMD_WIDTH == 32
-    0xffffffff, 0xffffffff, 0x7f3f1f0f, 0x07030100,
-#endif
+  const auto nbits_to_mask = BCAST128(_mm_set_epi32(
     0xffffffff, 0xffffffff, 0x7f3f1f0f, 0x07030100
-  );
+  ));
   auto bitmask0 = _mm(shuffle_epi8)(nbits_to_mask, nbits0);
   auto bitmask1 = _mm(shuffle_epi8)(nbits_to_mask, nbits1);
   
@@ -718,7 +715,7 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   _mm_store_si128((__m128i *)nbits_a, bit_count2);
 # else
   bit_count = _mm(hadd_epi16)(bit_count, bit_count);
-  _mm_storel_epi64((__mivec *)nbits_a, bit_count);
+  _mm_storel_epi64((__m128i *)nbits_a, bit_count);
 # endif
   
   alignas(SIMD_WIDTH) uint64_t bits_a[SIMD_WIDTH/4];
@@ -728,8 +725,9 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   _mmsi(store)((__mivec *)bitmask_a, bitmask0);
   _mmsi(store)((__mivec *)bitmask_a + 1, bitmask1);
 #else
-  auto nbits0 = _mm(unpacklo_epi8)(nbits, _mmsi(setzero)());
-  auto nbits1 = _mm(unpackhi_epi8)(nbits, _mmsi(setzero)());
+  auto nbits_mix = _mm(shuffle_epi8)(nbits, BCAST128(_mm_set_epi32(
+    0x0f070e06, 0x0d050c04, 0x0b030a02, 0x09010800
+  )));
   auto bits_lo0 = _mm(unpacklo_epi8)(bits_lo, _mmsi(setzero)());
   auto bits_lo1 = _mm(unpackhi_epi8)(bits_lo, _mmsi(setzero)());
   auto bits_hi0 = _mm(unpacklo_epi8)(bits_hi, _mmsi(setzero)());
@@ -743,11 +741,8 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
       bits_lo1);
 
   // 16 -> 32
-  auto nbits0_32_lo = _mmsi(and)(nbits0, _mm(set1_epi32)(0xFF));
-  auto nbits1_32_lo = _mmsi(and)(nbits1, _mm(set1_epi32)(0xFF));
-  auto nbits0_32_hi = _mm(srai_epi32)(nbits0, 16);
-  auto nbits1_32_hi = _mm(srai_epi32)(nbits1, 16);
-
+  auto nbits0_32_lo = _mmsi(and)(nbits_mix, _mm(set1_epi32)(0xff));
+  auto nbits1_32_lo = _mmsi(and)(_mm(srli_epi16)(nbits_mix, 8), _mm(set1_epi32)(0xff));
   auto bits0_32_lo = _mmsi(and)(bits0, _mm(set1_epi32)(0xFFFF));
   auto bits1_32_lo = _mmsi(and)(bits1, _mm(set1_epi32)(0xFFFF));
 # ifdef __AVX2__
@@ -770,17 +765,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   bits1_32_hi = _mm(cvtps_epi32)(_mm_castsi128_ps(bits1_32_hi));
 # endif
 
-  auto nbits0_32 = _mm(add_epi32)(nbits0_32_lo, nbits0_32_hi);
-  auto nbits1_32 = _mm(add_epi32)(nbits1_32_lo, nbits1_32_hi);
+  nbits_mix = _mm(madd_epi16)(nbits_mix, _mm(set1_epi16)(1));
   auto bits0_32 = _mmsi(or)(bits0_32_lo, bits0_32_hi);
   auto bits1_32 = _mmsi(or)(bits1_32_lo, bits1_32_hi);
 
   // 32 -> 64
-  auto nbits0_64_lo = _mmsi(and)(nbits0_32, _mm(set1_epi64x)(0xFF));
-  auto nbits1_64_lo = _mmsi(and)(nbits1_32, _mm(set1_epi64x)(0xFF));
-  auto nbits0_64_hi = _mm(srli_epi64)(nbits0_32, 32);
-  auto nbits1_64_hi = _mm(srli_epi64)(nbits1_32, 32);
-
+  auto nbits0_64_lo = _mmsi(and)(nbits_mix, _mm(set1_epi64x)(0xff));
+  auto nbits1_64_lo = _mmsi(and)(_mm(srli_epi16)(nbits_mix, 8), _mm(set1_epi64x)(0xff));
   auto bits0_64_lo = _mmsi(and)(bits0_32, _mm(set1_epi64x)(0xFFFFFFFF));
   auto bits1_64_lo = _mmsi(and)(bits1_32, _mm(set1_epi64x)(0xFFFFFFFF));
 # ifdef __AVX2__
@@ -805,16 +796,26 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   );
 # endif
 
-  auto nbits0_64 = _mm(add_epi64)(nbits0_64_lo, nbits0_64_hi);
-  auto nbits1_64 = _mm(add_epi64)(nbits1_64_lo, nbits1_64_hi);
   auto bits0_64 = _mmsi(or)(bits0_64_lo, bits0_64_hi);
   auto bits1_64 = _mmsi(or)(bits1_64_lo, bits1_64_hi);
+#ifdef __AVX2__
+  auto bit_count = _mm_hadd_epi32(_mm256_castsi256_si128(nbits_mix), _mm256_extracti128_si256(nbits_mix, 1));
+  bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
+    -1, -1, 0x0d090501, 0x0c080400
+  ));
+  alignas(16) uint8_t nbits_a[SIMD_WIDTH/4];
+  _mm_storel_epi64((__m128i *)nbits_a, bit_count);
+#else
+  auto bit_count = _mm_hadd_epi32(nbits_mix, nbits_mix);
+  bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
+    -1, -1, -1, 0x05010400
+  ));
+  alignas(16) uint8_t nbits_a[SIMD_WIDTH/2];
+  _mm_storel_epi64((__m128i *)nbits_a, bit_count);
+#endif
 
   // nbits_a <= 40 as we have at most 10 bits per symbol, so the call to the
   // writer is safe.
-  alignas(SIMD_WIDTH) uint64_t nbits_a[SIMD_WIDTH/4];
-  _mmsi(store)((__mivec *)nbits_a, nbits0_64);
-  _mmsi(store)((__mivec *)nbits_a + 1, nbits1_64);
   alignas(SIMD_WIDTH) uint64_t bits_a[SIMD_WIDTH/4];
   _mmsi(store)((__mivec *)bits_a, bits0_64);
   _mmsi(store)((__mivec *)bits_a + 1, bits1_64);
