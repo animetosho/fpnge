@@ -629,7 +629,10 @@ void TryPredictor(size_t bytes_per_line,
       FORCE_INLINE {
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
-    auto data_for_blend = _mmsi(and)(_mm(set1_epi8)(0xF0), bytes);
+    auto use_lowhi = _mm(cmpgt_epi8)(
+      _mm(add_epi8)(bytes, _mm(set1_epi8)(112)),
+      _mm(set1_epi8)(95)
+    );
 
     auto nbits_low16 =
         _mm(shuffle_epi8)(BCAST128(
@@ -640,15 +643,11 @@ void TryPredictor(size_t bytes_per_line,
                                 _mm_load_si128((__m128i *)table.last16_nbits)),
                             data_for_lut);
 
-    auto nbits = _mm(set1_epi8)(table.mid_nbits);
-
-    nbits = _mm(blendv_epi8)(
-        nbits, nbits_hi16,
-        _mm(cmpeq_epi8)(data_for_blend, _mm(set1_epi8)(0xF0)));
-
-    nbits = _mm(blendv_epi8)(
-        nbits, nbits_low16,
-        _mm(cmpeq_epi8)(data_for_blend, _mmsi(setzero)()));
+    auto nbits = _mm(blendv_epi8)(
+      _mm(set1_epi8)(table.mid_nbits),
+      _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
+      use_lowhi
+    );
 
     nbits = _mmsi(and)(nbits, _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec)));
 
@@ -842,7 +841,10 @@ void EncodeOneRow(size_t bytes_per_line,
     auto maskv = _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec));
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
-    auto data_for_blend = _mmsi(and)(_mm(set1_epi8)(0xF0), bytes);
+    auto use_lowhi = _mm(cmpgt_epi8)(
+      _mm(add_epi8)(bytes, _mm(set1_epi8)(112)),
+      _mm(set1_epi8)(95)
+    );
     auto data_for_midlut =
         _mmsi(and)(_mm(set1_epi8)(0xF), _mm(srai_epi16)(bytes, 4));
 
@@ -873,32 +875,23 @@ void EncodeOneRow(size_t bytes_per_line,
                                 (__m128i *)kBitReverseNibbleLookup)),
                             data_for_lut);
 
-    auto nbits = _mm(set1_epi8)(table.mid_nbits);
-
-    nbits = _mm(blendv_epi8)(
-        nbits, nbits_hi16,
-        _mm(cmpeq_epi8)(data_for_blend, _mm(set1_epi8)(0xF0)));
-
-    nbits = _mm(blendv_epi8)(
-        nbits, nbits_low16,
-        _mm(cmpeq_epi8)(data_for_blend, _mmsi(setzero)()));
-
+    auto nbits = _mm(blendv_epi8)(
+      _mm(set1_epi8)(table.mid_nbits),
+      _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
+      use_lowhi
+    );
     nbits = _mmsi(and)(nbits, maskv);
 
     auto bits_lo = _mm(blendv_epi8)(
-        bits_mid_lo, bits_hi16,
-        _mm(cmpeq_epi8)(data_for_blend, _mm(set1_epi8)(0xF0)));
-
-    bits_lo = _mm(blendv_epi8)(
-        bits_lo, bits_low16,
-        _mm(cmpeq_epi8)(data_for_blend, _mmsi(setzero)()));
-
+      bits_mid_lo,
+      _mm(blendv_epi8)(bits_low16, bits_hi16, bytes),
+      use_lowhi
+    );
     bits_lo = _mmsi(and)(bits_lo, maskv);
 
     auto bits_hi = _mmsi(and)(
         bits_mid_hi,
         _mm(cmpeq_epi8)(nbits, _mm(set1_epi8)(table.mid_nbits)));
-    bits_hi = _mmsi(and)(bits_hi, maskv);
 
     WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
   };
