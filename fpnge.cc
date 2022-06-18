@@ -479,6 +479,66 @@ uint32_t hadd(__mivec v) {
   return _mm_cvtsi128_si32(sum);
 }
 
+template <size_t predictor>
+FORCE_INLINE __mivec
+PredictVec(unsigned char *current_buf, const unsigned char *top_buf,
+           const unsigned char *left_buf, const unsigned char *topleft_buf) {
+  auto data = _mmsi(load)((__mivec *)(current_buf));
+  if (predictor == 0) {
+    return data;
+  } else if (predictor == 1) {
+    auto pred = _mmsi(loadu)((__mivec *)(left_buf));
+    return _mm(sub_epi8)(data, pred);
+  } else if (predictor == 2) {
+    auto pred = _mmsi(load)((__mivec *)(top_buf));
+    return _mm(sub_epi8)(data, pred);
+  } else if (predictor == 3) {
+    auto left = _mmsi(loadu)((__mivec *)(left_buf));
+    auto top = _mmsi(load)((__mivec *)(top_buf));
+    auto pred = _mm(avg_epu8)(top, left);
+    // emulate truncating average
+    pred = _mm(sub_epi8)(pred, _mmsi(and)(_mmsi(xor)(top, left),
+                                                  _mm(set1_epi8)(1)));
+    return _mm(sub_epi8)(data, pred);
+  } else {
+    auto a = _mmsi(loadu)((__mivec *)(left_buf));
+    auto b = _mmsi(load)((__mivec *)(top_buf));
+    auto c = _mmsi(loadu)((__mivec *)(topleft_buf));
+    auto min_bc = _mm(min_epu8)(b, c);
+    auto min_ac = _mm(min_epu8)(a, c);
+    auto pa = _mm(sub_epi8)(_mm(max_epu8)(b, c), min_bc);
+    auto pb = _mm(sub_epi8)(_mm(max_epu8)(a, c), min_ac);
+    auto min_pab = _mm(min_epu8)(pa, pb);
+    auto pc = _mm(sub_epi8)(_mm(max_epu8)(pa, pb), min_pab);
+    pc = _mmsi(or)(pc, _mm(cmpeq_epi8)(
+    	_mm(cmpeq_epi8)(min_bc, b),
+    	_mm(cmpeq_epi8)(min_ac, a)
+    ));
+    
+    auto use_a = _mm(cmpeq_epi8)(_mm(min_epu8)(min_pab, pc), pa);
+    auto use_b = _mm(cmpeq_epi8)(_mm(min_epu8)(pb, pc), pb);
+
+    auto pred = _mm(blendv_epi8)(_mm(blendv_epi8)(c, b, use_b), a, use_a);
+    return _mm(sub_epi8)(data, pred);
+    /*
+    // Equivalent scalar code:
+    for (size_t ii = 0; ii < 32; ii++) {
+      uint8_t a = left_buf[i + ii];
+      uint8_t b = top_buf[i + ii];
+      uint8_t c = topleft_buf[i + ii];
+      uint8_t bc = b - c;
+      uint8_t ca = c - a;
+      uint8_t pa = c < b ? bc : -bc;
+      uint8_t pb = a < c ? ca : -ca;
+      uint8_t pc = (a < c) == (c < b) ? (bc >= ca ? bc - ca : ca - bc) : 255;
+      uint8_t pred = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      uint8_t data = current_row_buf[i + ii] - pred;
+      predicted_data[ii] = data;
+    }
+    */
+  }
+}
+
 template <size_t predictor, typename CB, typename CB_ADL, typename CB_RLE>
 FORCE_INLINE void
 ProcessRow(size_t bytes_per_line_buf, const unsigned char *mask,
@@ -487,68 +547,8 @@ ProcessRow(size_t bytes_per_line_buf, const unsigned char *mask,
            CB &&cb, CB_ADL &&cb_adl, CB_RLE &&cb_rle) {
   size_t run = 0;
   for (size_t i = 0; i + SIMD_WIDTH <= bytes_per_line_buf; i += SIMD_WIDTH) {
-    alignas(SIMD_WIDTH) uint8_t predicted_data[SIMD_WIDTH] = {};
-    auto data = _mmsi(load)((__mivec *)(current_row_buf + i));
-    if (predictor == 0) {
-      _mmsi(store)((__mivec *)predicted_data, data);
-    } else if (predictor == 1) {
-      auto pred = _mmsi(loadu)((__mivec *)(left_buf + i));
-      _mmsi(store)((__mivec *)predicted_data,
-                         _mm(sub_epi8)(data, pred));
-    } else if (predictor == 2) {
-      auto pred = _mmsi(load)((__mivec *)(top_buf + i));
-      _mmsi(store)((__mivec *)predicted_data,
-                         _mm(sub_epi8)(data, pred));
-    } else if (predictor == 3) {
-      auto left = _mmsi(loadu)((__mivec *)(left_buf + i));
-      auto top = _mmsi(load)((__mivec *)(top_buf + i));
-      auto pred = _mm(avg_epu8)(top, left);
-      // emulate truncating average
-      pred = _mm(sub_epi8)(pred, _mmsi(and)(_mmsi(xor)(top, left),
-                                                    _mm(set1_epi8)(1)));
-      _mmsi(store)((__mivec *)predicted_data,
-                         _mm(sub_epi8)(data, pred));
-    } else {
-      auto a = _mmsi(loadu)((__mivec *)(left_buf + i));
-      auto b = _mmsi(load)((__mivec *)(top_buf + i));
-      auto c = _mmsi(loadu)((__mivec *)(topleft_buf + i));
-      auto min_bc = _mm(min_epu8)(b, c);
-      auto min_ac = _mm(min_epu8)(a, c);
-      auto pa = _mm(sub_epi8)(_mm(max_epu8)(b, c), min_bc);
-      auto pb = _mm(sub_epi8)(_mm(max_epu8)(a, c), min_ac);
-      auto min_pab = _mm(min_epu8)(pa, pb);
-      auto pc = _mm(sub_epi8)(_mm(max_epu8)(pa, pb), min_pab);
-      pc = _mmsi(or)(pc, _mm(cmpeq_epi8)(
-      	_mm(cmpeq_epi8)(min_bc, b),
-      	_mm(cmpeq_epi8)(min_ac, a)
-      ));
-      
-      auto use_a = _mm(cmpeq_epi8)(_mm(min_epu8)(min_pab, pc), pa);
-      auto use_b = _mm(cmpeq_epi8)(_mm(min_epu8)(pb, pc), pb);
-
-      auto pred = _mm(blendv_epi8)(_mm(blendv_epi8)(c, b, use_b), a, use_a);
-      _mmsi(store)((__mivec *)predicted_data,
-                         _mm(sub_epi8)(data, pred));
-      /*
-      // Equivalent scalar code:
-      for (size_t ii = 0; ii < 32; ii++) {
-        uint8_t a = left_buf[i + ii];
-        uint8_t b = top_buf[i + ii];
-        uint8_t c = topleft_buf[i + ii];
-        uint8_t bc = b - c;
-        uint8_t ca = c - a;
-        uint8_t pa = c < b ? bc : -bc;
-        uint8_t pb = a < c ? ca : -ca;
-        uint8_t pc = (a < c) == (c < b) ? (bc >= ca ? bc - ca : ca - bc) : 255;
-        uint8_t pred = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-        uint8_t data = current_row_buf[i + ii] - pred;
-        predicted_data[ii] = data;
-      }
-      */
-    }
-
+    auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i, left_buf + i, topleft_buf + i);
     auto maskv = _mmsi(load)((__mivec *)(mask + i));
-    auto pdata = _mmsi(load)((__mivec *)predicted_data);
 
     size_t bytes_per_vec = _mm_popcnt_u32(_mm(movemask_epi8)(maskv));
 
@@ -569,9 +569,9 @@ ProcessRow(size_t bytes_per_line_buf, const unsigned char *mask,
         cb_rle(run);
       }
       run = 0;
-      cb(predicted_data, mask + i);
+      cb(pdata, mask + i);
     }
-    cb_adl(bytes_per_vec, predicted_data, mask + i, i);
+    cb_adl(bytes_per_vec, pdata, mask + i, i);
   }
   if (run != 0) {
     cb_rle(run);
@@ -603,10 +603,8 @@ void TryPredictor(size_t bytes_per_line_buf, const unsigned char *mask,
                   size_t &best_cost, uint8_t &predictor, size_t dist_nbits) {
   size_t cost_rle = 0;
   __mivec cost_direct = _mmsi(setzero)();
-  auto cost_chunk_cb = [&](const uint8_t *predicted_data, const uint8_t *mask)
+  auto cost_chunk_cb = [&](const __mivec bytes, const uint8_t *mask)
       FORCE_INLINE {
-
-    auto bytes = _mmsi(load)((__mivec *)predicted_data);
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
     auto data_for_blend = _mmsi(and)(_mm(set1_epi8)(0xF0), bytes);
@@ -637,7 +635,7 @@ void TryPredictor(size_t bytes_per_line_buf, const unsigned char *mask,
   };
   ProcessRow<pred>(
       bytes_per_line_buf, mask, current_row_buf, top_buf, left_buf, topleft_buf,
-      cost_chunk_cb, [](size_t, const uint8_t *, const uint8_t *, size_t) {},
+      cost_chunk_cb, [](size_t, const __mivec, const uint8_t *, size_t) {},
       [&](size_t run) {
         cost_rle += table.first16_nbits[0];
         ForAllRLESymbols(run, [&](size_t len) {
@@ -818,9 +816,8 @@ void EncodeOneRow(size_t bytes_per_line_buf,
     last_adler_flush = len;
   };
 
-  auto encode_chunk_cb = [&](const uint8_t *predicted_data,
+  auto encode_chunk_cb = [&](const __mivec bytes,
                              const uint8_t *mask) {
-    auto bytes = _mmsi(load)((__mivec *)predicted_data);
     auto maskv = _mmsi(load)((__mivec *)mask);
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
@@ -885,7 +882,7 @@ void EncodeOneRow(size_t bytes_per_line_buf,
     WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
   };
 
-  auto adler_chunk_cb = [&](size_t bytes_per_vec, const uint8_t *predicted_data,
+  auto adler_chunk_cb = [&](size_t bytes_per_vec, const __mivec pdata,
                             const uint8_t *mask, size_t i) {
     len += bytes_per_vec;
 
@@ -893,8 +890,7 @@ void EncodeOneRow(size_t bytes_per_line_buf,
         _mm(mullo_epi32)(_mm(set1_epi32)(bytes_per_vec), adler_accum_s1),
         adler_accum_s2);
 
-    auto bytes = _mmsi(and)(_mmsi(load)((__mivec *)predicted_data),
-                                  _mmsi(load)((__mivec *)mask));
+    auto bytes = _mmsi(and)(pdata, _mmsi(load)((__mivec *)mask));
 
     adler_accum_s1 = _mm(add_epi32)(
         adler_accum_s1, _mm(sad_epu8)(bytes, _mmsi(setzero)()));
@@ -943,14 +939,16 @@ void CollectSymbolCounts(
     const unsigned char *top_buf, const unsigned char *left_buf,
     const unsigned char *topleft_buf, uint64_t *symbol_counts) {
 
-  auto encode_chunk_cb = [&](const uint8_t *predicted_data,
+  auto encode_chunk_cb = [&](const __mivec pdata,
                              const uint8_t *mask) {
+    alignas(SIMD_WIDTH) uint8_t predicted_data[SIMD_WIDTH];
+    _mmsi(store)((__mivec*)predicted_data, pdata);
     for (size_t i = 0; i < SIMD_WIDTH; i++) {
       symbol_counts[predicted_data[i]] += mask[i] != 0;
     }
   };
 
-  auto adler_chunk_cb = [&](size_t, const uint8_t *, const uint8_t *, size_t) {
+  auto adler_chunk_cb = [&](size_t, const __mivec, const uint8_t *, size_t) {
   };
 
   auto encode_rle_cb = [&](size_t run) {
