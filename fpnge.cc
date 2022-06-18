@@ -554,7 +554,8 @@ ProcessRow(size_t bytes_per_line,
   size_t run = 0;
   size_t i = 0;
   for (; i + SIMD_WIDTH <= bytes_per_line; i += SIMD_WIDTH) {
-    auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i, left_buf + i, topleft_buf + i);
+    auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i,
+                                      left_buf + i, topleft_buf + i);
     auto pdatais0 = _mm(movemask_epi8)(_mm(cmpeq_epi8)(pdata, _mmsi(setzero)()));
 
     if (pdatais0 == SIMD_MASK) {
@@ -571,7 +572,8 @@ ProcessRow(size_t bytes_per_line,
   
   size_t bytes_remaining = bytes_per_line ^ i;
   if (bytes_remaining) {
-    auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i, left_buf + i, topleft_buf + i);
+    auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i,
+                                      left_buf + i, topleft_buf + i);
     auto pdatais0 = _mm(movemask_epi8)(_mm(cmpeq_epi8)(pdata, _mmsi(setzero)()));
     auto mask = (1UL << bytes_remaining) - 1;
 
@@ -595,16 +597,23 @@ template <typename CB> void ForAllRLESymbols(size_t length, CB &&cb) {
   assert(length >= 4);
   length -= 1;
 
-  if (length % 258 == 1 || length % 258 == 2) {
-    length -= 3;
-    cb(3);
-  }
-  while (length >= 258) {
-    length -= 258;
-    cb(258);
-  }
-  if (length) {
-    cb(length);
+  if (length < 258) {
+    // fast path if long sequences are rare in the image
+    cb(length, 1);
+  } else {
+    auto runs = length / 258;
+    auto remain = length % 258;
+    if (remain == 1 || remain == 2) {
+      remain += 258 - 3;
+      runs--;
+      cb(3, 1);
+    }
+    if (runs) {
+      cb(258, runs);
+    }
+    if (remain) {
+      cb(remain, 1);
+    }
   }
 }
 
@@ -651,8 +660,8 @@ void TryPredictor(size_t bytes_per_line,
       cost_chunk_cb, [](const __mivec, const size_t) {},
       [&](size_t run) {
         cost_rle += table.first16_nbits[0];
-        ForAllRLESymbols(run, [&](size_t len) {
-          cost_rle += dist_nbits + table.lz77_length_nbits[len];
+        ForAllRLESymbols(run, [&](size_t len, size_t count) {
+          cost_rle += (dist_nbits + table.lz77_length_nbits[len]) * count;
         });
       });
   size_t cost = cost_rle + hadd(cost_direct);
@@ -923,9 +932,11 @@ void EncodeOneRow(size_t bytes_per_line,
 
   auto encode_rle_cb = [&](size_t run) {
     writer->Write(table.first16_nbits[0], table.first16_bits[0]);
-    ForAllRLESymbols(run, [&](size_t len) {
-      writer->Write(table.lz77_length_nbits[len], table.lz77_length_bits[len]);
-      writer->Write(dist_nbits, dist_bits);
+    ForAllRLESymbols(run, [&](size_t len, size_t count) {
+      while (count--) {
+        writer->Write(table.lz77_length_nbits[len], table.lz77_length_bits[len]);
+        writer->Write(dist_nbits, dist_bits);
+      }
     });
   };
 
@@ -991,7 +1002,7 @@ void CollectSymbolCounts(
         284, 284, 284, 284, 284, 284, 285,
     };
     ForAllRLESymbols(run,
-                     [&](size_t len) { symbol_counts[kLZ77Sym[len]] += 1; });
+                     [&](size_t len, size_t count) { symbol_counts[kLZ77Sym[len]] += count; });
   };
 
 #ifdef FPNGE_FIXED_PREDICTOR
