@@ -566,7 +566,7 @@ ProcessRow(size_t bytes_per_line,
       run = 0;
       cb(pdata, SIMD_WIDTH);
     }
-    cb_adl(SIMD_WIDTH, pdata, SIMD_WIDTH, i);
+    cb_adl(SIMD_WIDTH, pdata);
   }
   
   size_t bytes_remaining = bytes_per_line ^ i;
@@ -584,7 +584,7 @@ ProcessRow(size_t bytes_per_line,
       run = 0;
       cb(pdata, bytes_remaining);
     }
-    cb_adl(bytes_remaining, pdata, bytes_remaining, i);
+    cb_adl(bytes_remaining, pdata);
   }
   if (run != 0) {
     cb_rle(run);
@@ -648,7 +648,7 @@ void TryPredictor(size_t bytes_per_line,
   };
   ProcessRow<pred>(
       bytes_per_line, current_row_buf, top_buf, left_buf, topleft_buf,
-      cost_chunk_cb, [](size_t, const __mivec, const size_t bytes_in_vec, size_t) {},
+      cost_chunk_cb, [](size_t, const __mivec) {},
       [&](size_t run) {
         cost_rle += table.first16_nbits[0];
         ForAllRLESymbols(run, [&](size_t len) {
@@ -787,7 +787,6 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 }
 
 void EncodeOneRow(size_t bytes_per_line,
-                  const uint8_t *aligned_adler_mul_buf_ptr,
                   unsigned char *current_row_buf, const unsigned char *top_buf,
                   const unsigned char *left_buf, const unsigned char *topleft_buf,
                   const HuffmanTable &table,
@@ -895,12 +894,11 @@ void EncodeOneRow(size_t bytes_per_line,
     WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
   };
 
-  auto adler_chunk_cb = [&](size_t bytes_per_vec, const __mivec pdata,
-                            const size_t bytes_in_vec, size_t i) {
-    len += bytes_per_vec;
+  auto adler_chunk_cb = [&](size_t bytes_in_vec, const __mivec pdata) {
+    len += bytes_in_vec;
 
     adler_accum_s2 = _mm(add_epi32)(
-        _mm(mullo_epi32)(_mm(set1_epi32)(bytes_per_vec), adler_accum_s1),
+        _mm(mullo_epi32)(_mm(set1_epi32)(bytes_in_vec), adler_accum_s1),
         adler_accum_s2);
 
     auto bytes = _mmsi(and)(pdata, _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec)));
@@ -908,7 +906,12 @@ void EncodeOneRow(size_t bytes_per_line,
     adler_accum_s1 = _mm(add_epi32)(
         adler_accum_s1, _mm(sad_epu8)(bytes, _mmsi(setzero)()));
 
-    auto muls = _mmsi(load)((__mivec *)(aligned_adler_mul_buf_ptr + i));
+    auto muls = _mm(set_epi8)(
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+#if SIMD_WIDTH == 32
+      , 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+#endif
+    );
     auto bytesmuls = _mm(maddubs_epi16)(bytes, muls);
     adler_accum_s2 = _mm(add_epi32)(
         adler_accum_s2, _mm(madd_epi16)(bytesmuls, _mm(set1_epi16)(1)));
@@ -947,7 +950,7 @@ void EncodeOneRow(size_t bytes_per_line,
 }
 
 void CollectSymbolCounts(
-    size_t bytes_per_line, const uint8_t *aligned_adler_mul_buf_ptr,
+    size_t bytes_per_line,
     unsigned char *current_row_buf, const unsigned char *top_buf,
     const unsigned char *left_buf, const unsigned char *topleft_buf,
     uint64_t *symbol_counts) {
@@ -961,7 +964,7 @@ void CollectSymbolCounts(
     }
   };
 
-  auto adler_chunk_cb = [&](size_t, const __mivec, const size_t, size_t) {
+  auto adler_chunk_cb = [&](size_t, const __mivec) {
   };
 
   auto encode_rle_cb = [&](size_t run) {
@@ -1056,22 +1059,6 @@ size_t FPNGEEncode(size_t bytes_per_channel, size_t num_channels,
                          ? (SIMD_WIDTH - (intptr_t)aligned_buf_ptr % SIMD_WIDTH)
                          : 0;
 
-  std::vector<unsigned char> adler_mul_buf(bytes_per_line_buf + SIMD_WIDTH-1);
-  unsigned char *aligned_adler_mul_buf_ptr = adler_mul_buf.data();
-  aligned_adler_mul_buf_ptr +=
-      (intptr_t)aligned_adler_mul_buf_ptr % SIMD_WIDTH
-          ? (SIMD_WIDTH - (intptr_t)aligned_adler_mul_buf_ptr % SIMD_WIDTH)
-          : 0;
-
-  // Initialize the adler multipliers data.
-  memset(aligned_adler_mul_buf_ptr, 0x01, bytes_per_line);
-  for (size_t i = 0; i < bytes_per_line; i += SIMD_WIDTH) {
-    for (size_t ii = SIMD_WIDTH-1; ii-- > 0;) {
-      aligned_adler_mul_buf_ptr[i + ii] +=
-          aligned_adler_mul_buf_ptr[i + ii + 1];
-    }
-  }
-
   // likely an overestimate
   *output = (unsigned char *)malloc(1024 + 2 * bytes_per_line * height);
 
@@ -1111,7 +1098,7 @@ size_t FPNGEEncode(size_t bytes_per_channel, size_t num_channels,
       continue;
     }
 
-    CollectSymbolCounts(bytes_per_line, aligned_adler_mul_buf_ptr,
+    CollectSymbolCounts(bytes_per_line,
                         current_row_buf, top_buf,
                         left_buf, topleft_buf, symbol_counts);
   }
@@ -1142,7 +1129,7 @@ size_t FPNGEEncode(size_t bytes_per_channel, size_t num_channels,
 
     memcpy(current_row_buf, current_row_in, bytes_per_line);
 
-    EncodeOneRow(bytes_per_line, aligned_adler_mul_buf_ptr,
+    EncodeOneRow(bytes_per_line,
                  current_row_buf, top_buf, left_buf,
                  topleft_buf, huffman_table, s1, s2, dist_nbits, dist_bits,
                  &writer);
