@@ -566,7 +566,7 @@ ProcessRow(size_t bytes_per_line,
       run = 0;
       cb(pdata, SIMD_WIDTH);
     }
-    cb_adl(SIMD_WIDTH, pdata);
+    cb_adl(pdata, SIMD_WIDTH);
   }
   
   size_t bytes_remaining = bytes_per_line ^ i;
@@ -584,7 +584,7 @@ ProcessRow(size_t bytes_per_line,
       run = 0;
       cb(pdata, bytes_remaining);
     }
-    cb_adl(bytes_remaining, pdata);
+    cb_adl(pdata, bytes_remaining);
   }
   if (run != 0) {
     cb_rle(run);
@@ -648,7 +648,7 @@ void TryPredictor(size_t bytes_per_line,
   };
   ProcessRow<pred>(
       bytes_per_line, current_row_buf, top_buf, left_buf, topleft_buf,
-      cost_chunk_cb, [](size_t, const __mivec) {},
+      cost_chunk_cb, [](const __mivec, const size_t) {},
       [&](size_t run) {
         cost_rle += table.first16_nbits[0];
         ForAllRLESymbols(run, [&](size_t len) {
@@ -894,7 +894,7 @@ void EncodeOneRow(size_t bytes_per_line,
     WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
   };
 
-  auto adler_chunk_cb = [&](size_t bytes_in_vec, const __mivec pdata) {
+  auto adler_chunk_cb = [&](const __mivec pdata, const size_t bytes_in_vec) {
     len += bytes_in_vec;
 
     adler_accum_s2 = _mm(add_epi32)(
@@ -964,7 +964,7 @@ void CollectSymbolCounts(
     }
   };
 
-  auto adler_chunk_cb = [&](size_t, const __mivec) {
+  auto adler_chunk_cb = [&](const __mivec, const size_t) {
   };
 
   auto encode_rle_cb = [&](size_t run) {
