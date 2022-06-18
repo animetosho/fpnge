@@ -21,7 +21,7 @@
 #include <vector>
 
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 # define FORCE_INLINE [[msvc::forceinline]]
 # define __SSE4_1__ 1
 # ifdef __AVX2__
@@ -106,7 +106,7 @@ struct HuffmanTable {
 
   // Computes nbits[i] for i <= n, subject to min_limit[i] <= nbits[i] <=
   // max_limit[i], so to minimize sum(nbits[i] * freqs[i]).
-  static void ComputeCodeLengths(uint64_t *freqs, size_t n, uint8_t *min_limit,
+  static void ComputeCodeLengths(const uint64_t *freqs, size_t n, uint8_t *min_limit,
                                  uint8_t *max_limit, uint8_t *nbits) {
     size_t precision = 0;
     uint64_t freqsum = 0;
@@ -372,7 +372,7 @@ constexpr unsigned kCrcTable[] = {
     0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94,
     0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d};
 
-unsigned long update_crc(unsigned long crc, unsigned char *buf, int len) {
+unsigned long update_crc(unsigned long crc, const unsigned char *buf, int len) {
   static const uint64_t k1k2[] = {0x1'5444'2BD4ULL, 0x1'C6E4'1596ULL};
   static const uint64_t k3k4[] = {0x1'7519'97D0ULL, 0x0'CCAA'009EULL};
   static const uint64_t k5k6[] = {0x1'63CD'6124ULL, 0x0'0000'0000ULL};
@@ -457,7 +457,7 @@ unsigned long update_crc(unsigned long crc, unsigned char *buf, int len) {
   return c;
 }
 
-unsigned long compute_crc(unsigned char *buf, int len) {
+unsigned long compute_crc(const unsigned char *buf, int len) {
   return update_crc(0xffffffffL, buf, len) ^ 0xffffffffL;
 }
 
@@ -489,7 +489,7 @@ uint32_t hadd(__mivec v) {
 
 template <size_t predictor>
 FORCE_INLINE __mivec
-PredictVec(unsigned char *current_buf, const unsigned char *top_buf,
+PredictVec(const unsigned char *current_buf, const unsigned char *top_buf,
            const unsigned char *left_buf, const unsigned char *topleft_buf) {
   auto data = _mmsi(load)((__mivec *)(current_buf));
   if (predictor == 0) {
@@ -519,8 +519,8 @@ PredictVec(unsigned char *current_buf, const unsigned char *top_buf,
     auto min_pab = _mm(min_epu8)(pa, pb);
     auto pc = _mm(sub_epi8)(_mm(max_epu8)(pa, pb), min_pab);
     pc = _mmsi(or)(pc, _mm(cmpeq_epi8)(
-    	_mm(cmpeq_epi8)(min_bc, b),
-    	_mm(cmpeq_epi8)(min_ac, a)
+      _mm(cmpeq_epi8)(min_bc, b),
+      _mm(cmpeq_epi8)(min_ac, a)
     ));
     
     auto use_a = _mm(cmpeq_epi8)(_mm(min_epu8)(min_pab, pc), pa);
@@ -547,7 +547,7 @@ PredictVec(unsigned char *current_buf, const unsigned char *top_buf,
   }
 }
 
-alignas(SIMD_WIDTH) const int32_t _kMaskVec[] = {
+alignas(SIMD_WIDTH) constexpr int32_t _kMaskVec[] = {
     -1, -1, -1, -1,
 #if SIMD_WIDTH == 32
     -1, -1, -1, -1,
@@ -560,7 +560,7 @@ const uint8_t* kMaskVec = (const uint8_t *)_kMaskVec + SIMD_WIDTH;
 template <size_t predictor, typename CB, typename CB_ADL, typename CB_RLE>
 FORCE_INLINE void
 ProcessRow(size_t bytes_per_line,
-           unsigned char *current_row_buf, const unsigned char *top_buf,
+           const unsigned char *current_row_buf, const unsigned char *top_buf,
            const unsigned char *left_buf, const unsigned char *topleft_buf,
            CB &&cb, CB_ADL &&cb_adl, CB_RLE &&cb_rle) {
   size_t run = 0;
@@ -631,7 +631,7 @@ template <typename CB> void ForAllRLESymbols(size_t length, CB &&cb) {
 
 template <size_t pred>
 void TryPredictor(size_t bytes_per_line,
-                  unsigned char *current_row_buf, const unsigned char *top_buf,
+                  const unsigned char *current_row_buf, const unsigned char *top_buf,
                   const unsigned char *left_buf,
                   const unsigned char *topleft_buf, const HuffmanTable &table,
                   size_t &best_cost, uint8_t &predictor, size_t dist_nbits) {
@@ -688,7 +688,8 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
                                               size_t mid_lo_nbits,
                                               BitWriter *writer) {
 
-#if defined(__BMI2__) && defined(PLATFORM_AMD64) && !defined(__tune_znver1__) && !defined(__tune_znver2__)
+#if defined(__BMI2__) && defined(PLATFORM_AMD64) && \
+  !defined(__tune_bdver4__) && !defined(__tune_znver1__) && !defined(__tune_znver2__)
 # define USE_PEXT
 #endif
   // Merge bits_lo and bits_hi in 16-bit "bits".
@@ -851,7 +852,7 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 }
 
 void EncodeOneRow(size_t bytes_per_line,
-                  unsigned char *current_row_buf, const unsigned char *top_buf,
+                  const unsigned char *current_row_buf, const unsigned char *top_buf,
                   const unsigned char *left_buf, const unsigned char *topleft_buf,
                   const HuffmanTable &table,
                   uint32_t &s1, uint32_t &s2, size_t dist_nbits,
@@ -1011,7 +1012,7 @@ void EncodeOneRow(size_t bytes_per_line,
 
 void CollectSymbolCounts(
     size_t bytes_per_line,
-    unsigned char *current_row_buf, const unsigned char *top_buf,
+    const unsigned char *current_row_buf, const unsigned char *top_buf,
     const unsigned char *left_buf, const unsigned char *topleft_buf,
     uint64_t *symbol_counts) {
 
