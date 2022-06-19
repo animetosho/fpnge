@@ -690,7 +690,7 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 
 #if defined(__BMI2__) && defined(PLATFORM_AMD64) && \
   !defined(__tune_bdver4__) && !defined(__tune_znver1__) && !defined(__tune_znver2__)
-# define USE_PEXT 1
+//# define USE_PEXT 1  // vector version seems to generally be faster than PEXT variant
 #endif
 #ifdef __AVX2__
   constexpr uint8_t kPerm[] = {0, 1, 4, 5, 2, 3, 6, 7};
@@ -730,14 +730,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   _mmsi(store)((__mivec *)bitmask_a, bitmask0);
   _mmsi(store)((__mivec *)bitmask_a + 1, bitmask1);
   
-  auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(bit_count, _mm_set1_epi8(28)));
+  auto bit_count_accum = _mm_add_epi16(bit_count, _mm_slli_epi32(bit_count, 16));
+  auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(bit_count_accum, _mm_set1_epi8(56)));
   if (long_symbols == 0) {
-    // pre-sum so that we avoid an add in the loop below
-    bit_count = _mm_add_epi16(bit_count, _mm_slli_epi32(bit_count, 16));
 # ifdef __AVX2__
-    _mm_store_si128((__m128i *)nbits_a, bit_count);
+    _mm_store_si128((__m128i *)nbits_a, bit_count_accum);
 # else
-    _mm_storel_epi64((__m128i *)nbits_a, bit_count);
+    _mm_storel_epi64((__m128i *)nbits_a, bit_count_accum);
 # endif
     for (size_t ii = 0; ii < SIMD_WIDTH/4; ii += 2) {
       uint64_t bits = _pext_u64(bits_a[kPerm[ii + 1]], bitmask_a[kPerm[ii + 1]]);
@@ -803,9 +802,9 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 
   // 32 -> 64
 # ifdef __AVX2__
-  auto nbits_inv = _mm(sub_epi8)(_mm(set1_epi8)(32), nbits_mix);
-  auto nbits0_64_lo = _mmsi(and)(nbits_inv, _mm(set1_epi64x)(0xff));
-  auto nbits1_64_lo = _mmsi(and)(_mm(srli_epi16)(nbits_inv, 8), _mm(set1_epi64x)(0xff));
+  auto nbits_inv = _mm(subs_epu8)(_mm(set1_epi64x)(0x2020), nbits_mix);
+  auto nbits0_64_lo = _mmsi(and)(nbits_inv, _mm(set1_epi32)(0xff));
+  auto nbits1_64_lo = _mm(srli_epi16)(nbits_inv, 8);
   bits0 = _mm(sllv_epi32)(bits0, nbits0_64_lo);
   bits1 = _mm(sllv_epi32)(bits1, nbits1_64_lo);
   bits0 = _mm(srlv_epi64)(bits0, nbits0_64_lo);
@@ -841,7 +840,7 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   auto bit_count = _mm_hadd_epi32(nbits_mix, nbits_mix);
 # endif
   
-  // can't write more than 57 bits per BitWriter::Write call, so limit fast path to 2*28b pairs
+  // can't write more than 56 bits per BitWriter::Write call, so limit to 28b as 2*28b <= 56b
   auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(bit_count, _mm_set1_epi8(28)));
   if (long_symbols == 0) {
     // if top half of each 64-bit group is empty, we can do one more combine round - hopefully we arrive here often
