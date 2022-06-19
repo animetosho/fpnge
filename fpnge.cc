@@ -1052,17 +1052,21 @@ void EncodeOneRow(size_t bytes_per_line,
   auto encode_rle_cb = [&](size_t run) {
     writer->Write(table.first16_nbits[0], table.first16_bits[0]);
     ForAllRLESymbols(run, [&](size_t len, size_t count) {
+      uint32_t bits = (dist_bits << table.lz77_length_nbits[len]) | table.lz77_length_bits[len];
+      auto nbits = table.lz77_length_nbits[len] + dist_nbits;
       while (count--) {
-        writer->Write(table.lz77_length_nbits[len], table.lz77_length_bits[len]);
-        writer->Write(dist_nbits, dist_bits);
+        writer->Write(nbits, bits);
       }
     });
   };
 
+#ifdef FPNGE_FIXED_PREDICTOR
   if (predictor == 0) {
     ProcessRow<0>(bytes_per_line, current_row_buf, top_buf, left_buf,
                   topleft_buf, encode_chunk_cb, adler_chunk_cb, encode_rle_cb);
-  } else if (predictor == 1) {
+  } else
+#endif
+  if (predictor == 1) {
     ProcessRow<1>(bytes_per_line, current_row_buf, top_buf, left_buf,
                   topleft_buf, encode_chunk_cb, adler_chunk_cb, encode_rle_cb);
   } else if (predictor == 2) {
@@ -1071,7 +1075,7 @@ void EncodeOneRow(size_t bytes_per_line,
   } else if (predictor == 3) {
     ProcessRow<3>(bytes_per_line, current_row_buf, top_buf, left_buf,
                   topleft_buf, encode_chunk_cb, adler_chunk_cb, encode_rle_cb);
-  } else if (predictor == 4) {
+  } else {
     ProcessRow<4>(bytes_per_line, current_row_buf, top_buf, left_buf,
                   topleft_buf, encode_chunk_cb, adler_chunk_cb, encode_rle_cb);
   }
