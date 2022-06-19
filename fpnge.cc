@@ -769,23 +769,27 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 # endif
 
   nbits_mix = _mm(madd_epi16)(nbits_mix, _mm(set1_epi16)(1));
-  auto bits0_32 = _mmsi(or)(bits0_32_lo, bits0_32_hi);
-  auto bits1_32 = _mmsi(or)(bits1_32_lo, bits1_32_hi);
+  bits0 = _mmsi(or)(bits0_32_lo, bits0_32_hi);
+  bits1 = _mmsi(or)(bits1_32_lo, bits1_32_hi);
 
   // 32 -> 64
+# ifdef __AVX2__
+  auto nbits_inv = _mm(sub_epi8)(_mm(set1_epi8)(32), nbits_mix);
+  auto nbits0_64_lo = _mmsi(and)(nbits_inv, _mm(set1_epi64x)(0xff));
+  auto nbits1_64_lo = _mmsi(and)(_mm(srli_epi16)(nbits_inv, 8), _mm(set1_epi64x)(0xff));
+  bits0 = _mm(sllv_epi32)(bits0, nbits0_64_lo);
+  bits1 = _mm(sllv_epi32)(bits1, nbits1_64_lo);
+  bits0 = _mm(srlv_epi64)(bits0, nbits0_64_lo);
+  bits1 = _mm(srlv_epi64)(bits1, nbits1_64_lo);
+# else
   auto nbits0_64_lo = _mmsi(and)(nbits_mix, _mm(set1_epi64x)(0xff));
   auto nbits1_64_lo = _mmsi(and)(_mm(srli_epi16)(nbits_mix, 8), _mm(set1_epi64x)(0xff));
-  auto bits0_64_lo = _mmsi(and)(bits0_32, _mm(set1_epi64x)(0xFFFFFFFF));
-  auto bits1_64_lo = _mmsi(and)(bits1_32, _mm(set1_epi64x)(0xFFFFFFFF));
-# ifdef __AVX2__
-  auto bits0_64_hi =
-      _mm(sllv_epi64)(_mm(srli_epi64)(bits0_32, 32), nbits0_64_lo);
-  auto bits1_64_hi =
-      _mm(sllv_epi64)(_mm(srli_epi64)(bits1_32, 32), nbits1_64_lo);
-# else
+  auto bits0_64_lo = _mmsi(and)(bits0, _mm(set1_epi64x)(0xFFFFFFFF));
+  auto bits1_64_lo = _mmsi(and)(bits1, _mm(set1_epi64x)(0xFFFFFFFF));
+  
   // just do two shifts for SSE variant
-  auto bits0_64_hi = _mm(srli_epi64)(bits0_32, 32);
-  auto bits1_64_hi = _mm(srli_epi64)(bits1_32, 32);
+  auto bits0_64_hi = _mm(srli_epi64)(bits0, 32);
+  auto bits1_64_hi = _mm(srli_epi64)(bits1, 32);
   
   bits0_64_hi = _mm_blend_epi16(
     _mm_sll_epi64(bits0_64_hi, nbits0_64_lo),
@@ -797,10 +801,11 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
     _mm_sll_epi64(bits1_64_hi, _mm_unpackhi_epi64(nbits1_64_lo, nbits1_64_lo)),
     0xf0
   );
+  
+  bits0 = _mmsi(or)(bits0_64_lo, bits0_64_hi);
+  bits1 = _mmsi(or)(bits1_64_lo, bits1_64_hi);
 # endif
 
-  auto bits0_64 = _mmsi(or)(bits0_64_lo, bits0_64_hi);
-  auto bits1_64 = _mmsi(or)(bits1_64_lo, bits1_64_hi);
 #ifdef __AVX2__
   auto bit_count = _mm_hadd_epi32(_mm256_castsi256_si128(nbits_mix), _mm256_extracti128_si256(nbits_mix, 1));
   bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
@@ -820,8 +825,8 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   // nbits_a <= 40 as we have at most 10 bits per symbol, so the call to the
   // writer is safe.
   alignas(SIMD_WIDTH) uint64_t bits_a[SIMD_WIDTH/4];
-  _mmsi(store)((__mivec *)bits_a, bits0_64);
-  _mmsi(store)((__mivec *)bits_a + 1, bits1_64);
+  _mmsi(store)((__mivec *)bits_a, bits0);
+  _mmsi(store)((__mivec *)bits_a + 1, bits1);
 
 #endif
 #ifdef __AVX2__
