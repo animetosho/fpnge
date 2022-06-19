@@ -304,7 +304,7 @@ struct BitWriter {
 };
 
 void WriteHuffmanCode(uint32_t &dist_nbits, uint32_t &dist_bits,
-                      const HuffmanTable &table, BitWriter *writer) {
+                      const HuffmanTable &table, BitWriter *__restrict writer) {
   dist_nbits = 1;
   dist_bits = 0;
 
@@ -686,11 +686,11 @@ void TryPredictor(size_t bytes_per_line,
 FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
                                               __mivec bits_hi,
                                               size_t mid_lo_nbits,
-                                              BitWriter *writer) {
+                                              BitWriter *__restrict writer) {
 
 #if defined(__BMI2__) && defined(PLATFORM_AMD64) && \
   !defined(__tune_bdver4__) && !defined(__tune_znver1__) && !defined(__tune_znver2__)
-# define USE_PEXT
+# define USE_PEXT 1
 #endif
   // Merge bits_lo and bits_hi in 16-bit "bits".
 #ifdef USE_PEXT
@@ -835,27 +835,14 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   constexpr uint8_t kPerm[] = {0, 1, 2, 3};
 #endif
 
-  // call to BitWriter::Write manually inlined: compiler assumes aliasing may happen.
-  uint64_t buffer = writer->buffer;
-  uint64_t bits_in_buffer = writer->bits_in_buffer;
-  uint64_t bytes_written = writer->bytes_written;
   for (size_t ii = 0; ii < SIMD_WIDTH/4; ii++) {
     uint64_t bits = bits_a[kPerm[ii]];
 #ifdef USE_PEXT
     bits = _pext_u64(bits, bitmask_a[kPerm[ii]]);
 #endif
     uint64_t count = nbits_a[kPerm[ii]];
-    buffer |= bits << bits_in_buffer;
-    bits_in_buffer += count;
-    memcpy(writer->data + bytes_written, &buffer, 8);
-    size_t bytes_in_buffer = bits_in_buffer / 8;
-    bits_in_buffer -= bytes_in_buffer * 8;
-    buffer >>= bytes_in_buffer * 8;
-    bytes_written += bytes_in_buffer;
+    writer->Write(count, bits);
   }
-  writer->buffer = buffer;
-  writer->bits_in_buffer = bits_in_buffer;
-  writer->bytes_written = bytes_written;
 }
 
 void EncodeOneRow(size_t bytes_per_line,
@@ -863,7 +850,7 @@ void EncodeOneRow(size_t bytes_per_line,
                   const unsigned char *left_buf, const unsigned char *topleft_buf,
                   const HuffmanTable &table,
                   uint32_t &s1, uint32_t &s2, size_t dist_nbits,
-                  size_t dist_bits, BitWriter *writer) {
+                  size_t dist_bits, BitWriter *__restrict writer) {
 #ifndef FPNGE_FIXED_PREDICTOR
   uint8_t predictor;
   size_t best_cost = ~0U;
@@ -1021,7 +1008,7 @@ void CollectSymbolCounts(
     size_t bytes_per_line,
     const unsigned char *current_row_buf, const unsigned char *top_buf,
     const unsigned char *left_buf, const unsigned char *topleft_buf,
-    uint64_t *symbol_counts) {
+    uint64_t *__restrict symbol_counts) {
 
   auto encode_chunk_cb = [&](const __mivec pdata,
                              const size_t bytes_in_vec) {
@@ -1072,7 +1059,7 @@ void CollectSymbolCounts(
 #endif
 }
 
-void AppendBE32(size_t value, BitWriter *writer) {
+void AppendBE32(size_t value, BitWriter *__restrict writer) {
   writer->Write(8, value >> 24);
   writer->Write(8, (value >> 16) & 0xFF);
   writer->Write(8, (value >> 8) & 0xFF);
@@ -1080,7 +1067,7 @@ void AppendBE32(size_t value, BitWriter *writer) {
 }
 
 void WriteHeader(size_t width, size_t height, size_t bytes_per_channel,
-                 size_t num_channels, BitWriter *writer) {
+                 size_t num_channels, BitWriter *__restrict writer) {
   constexpr uint8_t kPNGHeader[8] = {137, 80, 78, 71, 13, 10, 26, 10};
   for (size_t i = 0; i < 8; i++) {
     writer->Write(8, kPNGHeader[i]);
