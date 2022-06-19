@@ -286,7 +286,7 @@ struct BitWriter {
     bits_in_buffer += count;
     memcpy(data + bytes_written, &buffer, 8);
     size_t bytes_in_buffer = bits_in_buffer / 8;
-    bits_in_buffer -= bytes_in_buffer * 8;
+    bits_in_buffer &= 7;
     buffer >>= bytes_in_buffer * 8;
     bytes_written += bytes_in_buffer;
   }
@@ -518,8 +518,8 @@ PredictVec(const unsigned char *current_buf, const unsigned char *top_buf,
     auto pb = _mm(sub_epi8)(_mm(max_epu8)(a, c), min_ac);
     auto min_pab = _mm(min_epu8)(pa, pb);
     auto pc = _mm(sub_epi8)(_mm(max_epu8)(pa, pb), min_pab);
-    pc = _mmsi(or)(pc, _mm(cmpeq_epi8)(
-      _mm(cmpeq_epi8)(min_bc, b),
+    pc = _mmsi(or)(pc, _mmsi(xor)(
+      _mm(cmpeq_epi8)(min_bc, c),
       _mm(cmpeq_epi8)(min_ac, a)
     ));
     
