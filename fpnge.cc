@@ -729,18 +729,20 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   auto nbits_mix = _mm(shuffle_epi8)(nbits, BCAST128(_mm_set_epi32(
     0x0f070e06, 0x0d050c04, 0x0b030a02, 0x09010800
   )));
-  auto bits_lo0 = _mm(unpacklo_epi8)(bits_lo, _mmsi(setzero)());
-  auto bits_lo1 = _mm(unpackhi_epi8)(bits_lo, _mmsi(setzero)());
-  auto bits_hi0 = _mm(unpacklo_epi8)(bits_hi, _mmsi(setzero)());
-  auto bits_hi1 = _mm(unpackhi_epi8)(bits_hi, _mmsi(setzero)());
-
-  auto bits0 = _mmsi(or)(
-      _mm(mullo_epi16)(_mm(set1_epi16)(1 << mid_lo_nbits), bits_hi0),
-      bits_lo0);
-  auto bits1 = _mmsi(or)(
-      _mm(mullo_epi16)(_mm(set1_epi16)(1 << mid_lo_nbits), bits_hi1),
-      bits_lo1);
-
+  __mivec bits0, bits1;
+  if (mid_lo_nbits == 8) {
+    bits0 = _mm(unpacklo_epi8)(bits_lo, bits_hi);
+    bits1 = _mm(unpackhi_epi8)(bits_lo, bits_hi);
+  } else {
+    auto nbits_shift = _mm_cvtsi32_si128(8 - mid_lo_nbits);
+    auto bits_lo_shifted = _mm(sll_epi16)(bits_lo, nbits_shift);
+    bits0 = _mm(unpacklo_epi8)(bits_lo_shifted, bits_hi);
+    bits1 = _mm(unpackhi_epi8)(bits_lo_shifted, bits_hi);
+    
+    bits0 = _mm(srl_epi16)(bits0, nbits_shift);
+    bits1 = _mm(srl_epi16)(bits1, nbits_shift);
+  }
+  
   // 16 -> 32
   auto nbits0_32_lo = _mmsi(and)(nbits_mix, _mm(set1_epi32)(0xff));
   auto nbits1_32_lo = _mmsi(and)(_mm(srli_epi16)(nbits_mix, 8), _mm(set1_epi32)(0xff));
