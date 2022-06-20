@@ -967,9 +967,9 @@ void EncodeOneRow(size_t bytes_per_line,
     auto maskv = _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec));
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
-    auto use_lowhi = _mm(cmpgt_epi8)(
-      _mm(add_epi8)(bytes, _mm(set1_epi8)(112)),
-      _mm(set1_epi8)(95)
+    auto use_mid = _mm(cmpgt_epi8)(
+      _mm(set1_epi8)(96),
+      _mm(add_epi8)(bytes, _mm(set1_epi8)(112))
     );
     auto data_for_midlut =
         _mmsi(and)(_mm(set1_epi8)(0xF), _mm(srai_epi16)(bytes, 4));
@@ -1002,22 +1002,20 @@ void EncodeOneRow(size_t bytes_per_line,
                             data_for_lut);
 
     auto nbits = _mm(blendv_epi8)(
-      _mm(set1_epi8)(table.mid_nbits),
       _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
-      use_lowhi
+      _mm(set1_epi8)(table.mid_nbits),
+      use_mid
     );
     nbits = _mmsi(and)(nbits, maskv);
 
     auto bits_lo = _mm(blendv_epi8)(
-      bits_mid_lo,
       _mm(blendv_epi8)(bits_low16, bits_hi16, bytes),
-      use_lowhi
+      bits_mid_lo,
+      use_mid
     );
-    bits_lo = _mmsi(and)(bits_lo, maskv);
 
-    auto bits_hi = _mmsi(and)(
-        bits_mid_hi,
-        _mm(cmpeq_epi8)(nbits, _mm(set1_epi8)(table.mid_nbits)));
+    // need to mask out unused hi bits because WriteBits uses OR operations to merge data (this might not be needed in PEXT variant)
+    auto bits_hi = _mmsi(and)(use_mid, bits_mid_hi);
 
     WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
   };
