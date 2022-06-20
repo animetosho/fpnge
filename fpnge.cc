@@ -685,7 +685,6 @@ void TryPredictor(size_t bytes_per_line,
   }
 }
 
-// Either bits_hi is empty, or bits_lo contains exactly mid_lo_nbits bits.
 FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
                                               __mivec bits_hi,
                                               size_t mid_lo_nbits,
@@ -693,7 +692,7 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 
 #if defined(__BMI2__) && defined(PLATFORM_AMD64) && \
   !defined(__tune_bdver4__) && !defined(__tune_znver1__) && !defined(__tune_znver2__)
-//# define USE_PEXT 1  // vector version seems to generally be faster than PEXT variant
+# define USE_PEXT 1
 #endif
 #ifdef __AVX2__
   constexpr uint8_t kPerm[] = {0, 1, 4, 5, 2, 3, 6, 7};
@@ -733,22 +732,6 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   _mmsi(store)((__mivec *)bitmask_a, bitmask0);
   _mmsi(store)((__mivec *)bitmask_a + 1, bitmask1);
   
-  auto bit_count_accum = _mm_add_epi16(bit_count, _mm_slli_epi32(bit_count, 16));
-  auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(bit_count_accum, _mm_set1_epi8(56)));
-  if (long_symbols == 0) {
-# ifdef __AVX2__
-    _mm_store_si128((__m128i *)nbits_a, bit_count_accum);
-# else
-    _mm_storel_epi64((__m128i *)nbits_a, bit_count_accum);
-# endif
-    for (size_t ii = 0; ii < SIMD_WIDTH/4; ii += 2) {
-      uint64_t bits = _pext_u64(bits_a[kPerm[ii + 1]], bitmask_a[kPerm[ii + 1]]);
-      bits <<= nbits_a[ii];
-      bits |= _pext_u64(bits_a[kPerm[ii]], bitmask_a[kPerm[ii]]);
-      writer->Write(nbits_a[ii + 1], bits);
-    }
-    return;
-  }
 # ifdef __AVX2__
   bit_count = _mm_shuffle_epi32(bit_count, _MM_SHUFFLE(3, 1, 2, 0));
   _mm_store_si128((__m128i *)nbits_a, bit_count);
@@ -843,70 +826,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 
 # ifdef __AVX2__
   auto bit_count = _mm_hadd_epi32(_mm256_castsi256_si128(nbits_mix), _mm256_extracti128_si256(nbits_mix, 1));
-# else
-  auto bit_count = _mm_hadd_epi32(nbits_mix, nbits_mix);
-# endif
-  
-  // can't write more than 56 bits per BitWriter::Write call, so limit to 28b as 2*28b <= 56b
-  auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(bit_count, _mm_set1_epi8(28)));
-  if (long_symbols == 0) {
-    // if top half of each 64-bit group is empty, we can do one more combine round - hopefully we arrive here often
-    // firstly, extract bottom 32-bits of each group
-    bits0 = _mmsi(castps)(_mm(shuffle_ps)(
-# ifdef __AVX2__
-      _mm256_castsi256_ps(bits0), _mm256_castsi256_ps(bits1),
-# else
-      _mm_castsi128_ps(bits0), _mm_castsi128_ps(bits1),
-# endif
-      _MM_SHUFFLE(2, 0, 2, 0)));
-    
-    // put count into proper order
-# if defined(FPNGE_SLOW_PSHUFB) && !defined(__AVX2__)
-    bit_count = _mm_unpacklo_epi8(bit_count, _mm_srli_epi64(bit_count, 32));
-# else
-    bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
-      -1, -1, 0x0d090c08, 0x05010400
-    ));
-# endif
-    
-# ifdef __AVX2__
-    auto nbits0_shift = _mm256_cvtepu8_epi32(_mm_subs_epu8(_mm_set1_epi16(32), bit_count));
-    // 32->64
-    bits0 = _mm(sllv_epi32)(bits0, nbits0_shift);
-    bits0 = _mm(srlv_epi64)(bits0, nbits0_shift);
-    
-    alignas(SIMD_WIDTH) uint64_t bits_b[SIMD_WIDTH/8];
-    _mmsi(store)((__mivec *)bits_b, bits0);
-    
-    bit_count = _mm_maddubs_epi16(bit_count, _mm_set1_epi8(1));
-    alignas(16) uint16_t nbits_b[SIMD_WIDTH/8];
-    _mm_storel_epi64((__m128i *)nbits_b, bit_count);
-    
-    for (size_t ii = 0; ii < SIMD_WIDTH/8; ii++) {
-      writer->Write(nbits_b[ii], bits_b[ii]);
-    }
-# else
-    alignas(SIMD_WIDTH) uint32_t bits_b[SIMD_WIDTH/4];
-    _mmsi(store)((__mivec *)bits_b, bits0);
-    alignas(16) uint8_t nbits_b[8];
-    bit_count = _mm_add_epi8(bit_count, _mm_slli_epi16(bit_count, 8));
-    _mm_storel_epi64((__m128i *)nbits_b, bit_count);
-    for (size_t ii = 0; ii < SIMD_WIDTH/4; ii += 2) {
-      uint64_t bits = bits_b[ii + 1];
-      bits = (bits << nbits_b[ii]) | bits_b[ii];
-      writer->Write(nbits_b[ii + 1], bits);
-    }
-# endif
-    return;
-  }
-  
-# ifdef __AVX2__
   bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
     -1, -1, 0x0d090501, 0x0c080400
   ));
   alignas(16) uint8_t nbits_a[SIMD_WIDTH/4];
   _mm_storel_epi64((__m128i *)nbits_a, bit_count);
 # else
+  auto bit_count = _mm_hadd_epi32(nbits_mix, nbits_mix);
 #  ifdef FPNGE_SLOW_PSHUFB
   bit_count = _mm_unpacklo_epi8(bit_count, _mm_srli_epi64(bit_count, 32));
 #  else
@@ -932,6 +858,123 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
     bits = _pext_u64(bits, bitmask_a[kPerm[ii]]);
 #endif
     writer->Write(nbits_a[kPerm[ii]], bits);
+  }
+}
+
+// as above, but without high byte
+FORCE_INLINE void WriteBitsShort(__mivec nbits, __mivec bits,
+                                 BitWriter *__restrict writer) {
+
+#ifdef USE_PEXT
+  // convert nbits into a mask
+  auto bitmask = _mm(shuffle_epi8)(BCAST128(_mm_set_epi32(
+    0xffffffff, 0xffffffff, 0x7f3f1f0f, 0x07030100
+  )), nbits);
+  auto bit_count = _mm(sad_epu8)(nbits, _mmsi(setzero)());
+  
+  alignas(SIMD_WIDTH) uint64_t nbits_a[SIMD_WIDTH/8];
+  _mmsi(store)((__mivec *)nbits_a, bit_count);
+  alignas(SIMD_WIDTH) uint64_t bits_a[SIMD_WIDTH/8];
+  _mmsi(store)((__mivec *)bits_a, bits);
+  alignas(SIMD_WIDTH) uint64_t bitmask_a[SIMD_WIDTH/8];
+  _mmsi(store)((__mivec *)bitmask_a, bitmask);
+#else
+  // 8 -> 16
+  auto prod = _mm(slli_epi16)(_mm(shuffle_epi8)(BCAST128(_mm_set_epi32(
+    //0x80402010, 0x08040201, 0x80402010, 0x08040201
+    // since we can't handle 8 bits, we'll under-shift it and do an extra shift
+    -1, 0xffffff80, 0x40201008, 0x040201ff
+  )), nbits), 8);
+  auto bits_hi = _mm(mulhi_epu16)(_mmsi(andnot)(_mm(set1_epi16)(0xff), bits), prod);
+  bits_hi = _mm(add_epi16)(bits_hi, bits_hi);
+  bits = _mmsi(or)(_mmsi(and)(bits, _mm(set1_epi16)(0xff)), bits_hi);
+  nbits = _mm(maddubs_epi16)(nbits, _mm(set1_epi8)(1));
+  
+  // 16 -> 32
+  auto nbits_32_lo = _mmsi(and)(nbits, _mm(set1_epi32)(0xff));
+  auto bits_32_lo = _mmsi(and)(bits, _mm(set1_epi32)(0xFFFF));
+  auto bits_32_hi = _mm(srli_epi32)(bits, 16);
+# ifdef __AVX2__
+  bits_32_hi =
+      _mm(sllv_epi32)(bits_32_hi, nbits_32_lo);
+# else
+  bits_32_hi = _mm_castps_si128(_mm(cvtepi32_ps)(bits_32_hi));
+  bits_32_hi = _mm(add_epi32)(bits_32_hi, _mm(slli_epi32)(nbits_32_lo, 23));
+  bits_32_hi = _mm(cvtps_epi32)(_mm_castsi128_ps(bits_32_hi));
+# endif
+  nbits = _mm(madd_epi16)(nbits, _mm(set1_epi16)(1));
+  bits = _mmsi(or)(bits_32_lo, bits_32_hi);
+
+  // 32 -> 64
+# ifdef __AVX2__
+  auto nbits_inv = _mm(subs_epu8)(_mm(set1_epi64x)(0x20), nbits);
+  bits = _mm(sllv_epi32)(bits, nbits_inv);
+  bits = _mm(srlv_epi64)(bits, nbits_inv);
+# else
+  auto nbits_64_lo = _mmsi(and)(nbits, _mm(set1_epi64x)(0xff));
+  auto bits_64_lo = _mmsi(and)(bits, _mm(set1_epi64x)(0xFFFFFFFF));
+  auto bits_64_hi = _mm(srli_epi64)(bits, 32);
+  bits_64_hi = _mm_blend_epi16(
+    _mm_sll_epi64(bits_64_hi, nbits_64_lo),
+    _mm_sll_epi64(bits_64_hi, _mm_unpackhi_epi64(nbits_64_lo, nbits_64_lo)),
+    0xf0
+  );
+  bits = _mmsi(or)(bits_64_lo, bits_64_hi);
+# endif
+  
+  auto nbits2 = _mm_hadd_epi32(
+# ifdef __AVX2__
+    _mm256_castsi256_si128(nbits), _mm256_extracti128_si256(nbits, 1)
+# else
+    nbits, nbits
+# endif
+  );
+  
+  alignas(16) uint32_t nbits_a[4];
+  alignas(SIMD_WIDTH) uint64_t bits_a[SIMD_WIDTH/8];
+  
+  /*
+# ifdef __AVX2__
+  auto long_symbols = _mm_movemask_epi8(_mm_cmpgt_epi8(nbits2, _mm_set1_epi8(28)));
+  if (long_symbols == 0) {
+    // if top half of each 64-bit group is empty, we can do one more combine round - hopefully we arrive here often
+    auto bits2 = _mm_castps_si128(_mm_shuffle_ps(
+      _mm_castsi128_ps(_mm256_castsi256_si128(bits)), _mm_castsi128_ps(_mm256_extracti128_si256(bits, 1)),
+      _MM_SHUFFLE(2, 0, 2, 0)));
+    
+    auto nbits_shift = _mm_subs_epu8(_mm_set1_epi64x(32), nbits2);
+    bits2 = _mm_sllv_epi32(bits2, nbits_shift);
+    bits2 = _mm_srlv_epi64(bits2, nbits_shift);
+    
+    _mm_store_si128((__m128i *)bits_a, bits2);
+    
+    nbits2 = _mm_hadd_epi32(nbits2, nbits2);
+    _mm_storel_epi64((__m128i *)nbits_a, nbits2);
+    
+    writer->Write(nbits_a[0], bits_a[0]);
+    writer->Write(nbits_a[1], bits_a[1]);
+    return;
+  }
+# endif
+  */
+  
+  _mm_store_si128((__m128i *)nbits_a, nbits2);
+  _mmsi(store)((__mivec *)bits_a, bits);
+
+#endif
+
+  for (size_t ii = 0; ii < SIMD_WIDTH/8; ii++) {
+    uint64_t bits = bits_a[ii];
+#ifdef USE_PEXT
+    bits = _pext_u64(bits, bitmask_a[ii]);
+#endif
+    if (nbits_a[ii] + writer->bits_in_buffer > 63) {
+      // hope this case rarely occurs
+      writer->Write(16, bits & 0xffff);
+      bits >>= 16;
+      nbits_a[ii] -= 16;
+    }
+    writer->Write(nbits_a[ii], bits);
   }
 }
 
@@ -986,9 +1029,6 @@ void EncodeOneRow(size_t bytes_per_line,
       _mm(set1_epi8)(96),
       _mm(add_epi8)(bytes, _mm(set1_epi8)(112))
     );
-    auto data_for_midlut =
-        _mmsi(and)(_mm(set1_epi8)(0xF), _mm(srai_epi16)(bytes, 4));
-
     auto nbits_low16 =
         _mm(shuffle_epi8)(BCAST128(
                                 _mm_load_si128((__m128i *)table.first16_nbits)),
@@ -1006,33 +1046,46 @@ void EncodeOneRow(size_t bytes_per_line,
         _mm(shuffle_epi8)(BCAST128(
                                 _mm_load_si128((__m128i *)table.last16_bits)),
                             data_for_lut);
-    auto bits_mid_lo =
-        _mm(shuffle_epi8)(BCAST128(
-                                _mm_load_si128((__m128i *)table.mid_lowbits)),
-                            data_for_midlut);
+    
+    if (_mm(movemask_epi8)(use_mid)) {
+      auto data_for_midlut =
+          _mmsi(and)(_mm(set1_epi8)(0xF), _mm(srai_epi16)(bytes, 4));
+      
+      auto bits_mid_lo =
+          _mm(shuffle_epi8)(BCAST128(
+                                  _mm_load_si128((__m128i *)table.mid_lowbits)),
+                              data_for_midlut);
 
-    auto bits_mid_hi =
-        _mm(shuffle_epi8)(BCAST128(_mm_load_si128(
-                                (__m128i *)kBitReverseNibbleLookup)),
-                            data_for_lut);
+      auto bits_mid_hi =
+          _mm(shuffle_epi8)(BCAST128(_mm_load_si128(
+                                  (__m128i *)kBitReverseNibbleLookup)),
+                              data_for_lut);
 
-    auto nbits = _mm(blendv_epi8)(
-      _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
-      _mm(set1_epi8)(table.mid_nbits),
-      use_mid
-    );
-    nbits = _mmsi(and)(nbits, maskv);
+      auto nbits = _mm(blendv_epi8)(
+        _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
+        _mm(set1_epi8)(table.mid_nbits),
+        use_mid
+      );
+      nbits = _mmsi(and)(nbits, maskv);
 
-    auto bits_lo = _mm(blendv_epi8)(
-      _mm(blendv_epi8)(bits_low16, bits_hi16, bytes),
-      bits_mid_lo,
-      use_mid
-    );
+      auto bits_lo = _mm(blendv_epi8)(
+        _mm(blendv_epi8)(bits_low16, bits_hi16, bytes),
+        bits_mid_lo,
+        use_mid
+      );
 
-    // need to mask out unused hi bits because WriteBits uses OR operations to merge data (this might not be needed in PEXT variant)
-    auto bits_hi = _mmsi(and)(use_mid, bits_mid_hi);
+      // need to mask out unused hi bits because WriteBits uses OR operations to merge data (this might not be needed in PEXT variant)
+      auto bits_hi = _mmsi(and)(use_mid, bits_mid_hi);
 
-    WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
+      WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
+    } else {
+      // mid never used - we can make some shortcuts
+      auto nbits = _mm(blendv_epi8)(nbits_low16, nbits_hi16, bytes);
+      auto bits_lo = _mm(blendv_epi8)(bits_low16, bits_hi16, bytes);
+      nbits = _mmsi(and)(nbits, maskv);
+      
+      WriteBitsShort(nbits, bits_lo, writer);
+    }
   };
 
   auto adler_chunk_cb = [&](const __mivec pdata, const size_t bytes_in_vec) {
