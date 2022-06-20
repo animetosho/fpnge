@@ -40,6 +40,9 @@
 # define PLATFORM_AMD64 1
 #endif
 
+#if defined(__tune_atom__) || defined(__tune_slm__) || defined(__tune_btver1__)
+# define FPNGE_SLOW_PSHUFB
+#endif
 
 #include <wmmintrin.h>  // for CLMUL
 
@@ -754,9 +757,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
 # endif
   
 #else
+# ifdef FPNGE_SLOW_PSHUFB
+  auto nbits_mix = _mm(unpacklo_epi8)(nbits, _mm(unpackhi_epi64)(nbits, nbits));
+# else
   auto nbits_mix = _mm(shuffle_epi8)(nbits, BCAST128(_mm_set_epi32(
     0x0f070e06, 0x0d050c04, 0x0b030a02, 0x09010800
   )));
+# endif
   __mivec bits0, bits1;
   if (mid_lo_nbits == 8) {
     bits0 = _mm(unpacklo_epi8)(bits_lo, bits_hi);
@@ -854,9 +861,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
       _MM_SHUFFLE(2, 0, 2, 0)));
     
     // put count into proper order
+# if defined(FPNGE_SLOW_PSHUFB) && !defined(__AVX2__)
+    bit_count = _mm_unpacklo_epi8(bit_count, _mm_srli_epi64(bit_count, 32));
+# else
     bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
       -1, -1, 0x0d090c08, 0x05010400
     ));
+# endif
     
 # ifdef __AVX2__
     auto nbits0_shift = _mm256_cvtepu8_epi32(_mm_subs_epu8(_mm_set1_epi16(32), bit_count));
@@ -896,9 +907,13 @@ FORCE_INLINE void WriteBits(__mivec nbits, __mivec bits_lo,
   alignas(16) uint8_t nbits_a[SIMD_WIDTH/4];
   _mm_storel_epi64((__m128i *)nbits_a, bit_count);
 # else
+#  ifdef FPNGE_SLOW_PSHUFB
+  bit_count = _mm_unpacklo_epi8(bit_count, _mm_srli_epi64(bit_count, 32));
+#  else
   bit_count = _mm_shuffle_epi8(bit_count, _mm_set_epi32(
-    -1, -1, -1, 0x05010400
+    -1, -1, 0x0d090c08, 0x05010400
   ));
+#  endif
   alignas(16) uint8_t nbits_a[SIMD_WIDTH/2];
   _mm_storel_epi64((__m128i *)nbits_a, bit_count);
 # endif
