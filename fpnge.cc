@@ -22,13 +22,15 @@
 
 
 #if defined(_MSC_VER) && !defined(__clang__)
-# define FORCE_INLINE [[msvc::forceinline]]
+# define FORCE_INLINE_LAMBDA [[msvc::forceinline]]
+# define FORCE_INLINE __forceinline
 # define __SSE4_1__ 1
 # ifdef __AVX2__
 #  define __BMI2__ 1
 # endif
 #else
-# define FORCE_INLINE __attribute__((always_inline))
+# define FORCE_INLINE_LAMBDA __attribute__((always_inline))
+# define FORCE_INLINE __attribute__((always_inline)) inline
 #endif
 
 #if defined(__x86_64__) || \
@@ -54,7 +56,7 @@
 # define BCAST128 _mm256_broadcastsi128_si256
 # define INT2VEC(v) _mm256_castsi128_si256(_mm_cvtsi32_si128(v))
 # define SIMD_WIDTH 32
-# define SIMD_MASK 0xffffffff
+# define SIMD_MASK 0xffffffffU
 #elif defined(__SSE4_1__)
 # include <nmmintrin.h>
 # define _mm(f) _mm_##f
@@ -63,7 +65,7 @@
 # define BCAST128(v) (v)
 # define INT2VEC _mm_cvtsi32_si128
 # define SIMD_WIDTH 16
-# define SIMD_MASK 0xffff
+# define SIMD_MASK 0xffffU
 #else
 # error Requires SSE4.1 support minium
 #endif
@@ -122,15 +124,15 @@ struct HuffmanTable {
       precision = std::max<size_t>(max_limit[i], precision);
     }
     uint64_t infty = freqsum * precision;
-    std::vector<uint64_t> dynp(((1 << precision) + 1) * (n + 1), infty);
+    std::vector<uint64_t> dynp(((1U << precision) + 1) * (n + 1), infty);
     auto d = [&](size_t sym, size_t off) -> uint64_t & {
       return dynp[sym * ((1 << precision) + 1) + off];
     };
     d(0, 0) = 0;
     for (size_t sym = 0; sym < n; sym++) {
       for (size_t bits = min_limit[sym]; bits <= max_limit[sym]; bits++) {
-        size_t off_delta = 1 << (precision - bits);
-        for (size_t off = 0; off + off_delta <= (1 << precision); off++) {
+        size_t off_delta = 1U << (precision - bits);
+        for (size_t off = 0; off + off_delta <= (1U << precision); off++) {
           d(sym + 1, off + off_delta) = std::min(
               d(sym, off) + freqs[sym] * bits, d(sym + 1, off + off_delta));
         }
@@ -138,12 +140,12 @@ struct HuffmanTable {
     }
 
     size_t sym = n;
-    size_t off = 1 << precision;
+    size_t off = 1U << precision;
 
     while (sym-- > 0) {
       assert(off > 0);
       for (size_t bits = min_limit[sym]; bits <= max_limit[sym]; bits++) {
-        size_t off_delta = 1 << (precision - bits);
+        size_t off_delta = 1U << (precision - bits);
         if (off_delta <= off &&
             d(sym + 1, off) == d(sym, off - off_delta) + freqs[sym] * bits) {
           off -= off_delta;
@@ -263,7 +265,7 @@ struct HuffmanTable {
     mid_nbits = nbits[16];
     mid_lowbits[0] = mid_lowbits[15] = 0;
     for (size_t i = 16; i < 240; i += 16) {
-      mid_lowbits[i / 16] = bits[i] & ((1 << (mid_nbits - 4)) - 1);
+      mid_lowbits[i / 16] = bits[i] & ((1U << (mid_nbits - 4)) - 1);
     }
     for (size_t i = 16; i < 240; i++) {
       assert(nbits[i] == mid_nbits);
@@ -273,7 +275,7 @@ struct HuffmanTable {
     end_bits = bits[256];
     // Construct lz77 lookup tables.
     for (size_t i = 0; i < 29; i++) {
-      for (size_t j = 0; j < (1 << kLZ77NBits[i]); j++) {
+      for (size_t j = 0; j < (1U << kLZ77NBits[i]); j++) {
         lz77_length_nbits[kLZ77Base[i] + j] = nbits[257 + i] + kLZ77NBits[i];
         lz77_length_sym[kLZ77Base[i] + j] = 257 + i;
         lz77_length_bits[kLZ77Base[i] + j] =
@@ -570,7 +572,7 @@ static void ProcessRow(size_t bytes_per_line,
   for (; i + SIMD_WIDTH <= bytes_per_line; i += SIMD_WIDTH) {
     auto pdata = PredictVec<predictor>(current_row_buf + i, top_buf + i,
                                       left_buf + i, topleft_buf + i);
-    auto pdatais0 = _mm(movemask_epi8)(_mm(cmpeq_epi8)(pdata, _mmsi(setzero)()));
+    unsigned pdatais0 = _mm(movemask_epi8)(_mm(cmpeq_epi8)(pdata, _mmsi(setzero)()));
 
     if (pdatais0 == SIMD_MASK) {
       run += SIMD_WIDTH;
@@ -640,7 +642,7 @@ static void TryPredictor(size_t bytes_per_line,
   size_t cost_rle = 0;
   __mivec cost_direct = _mmsi(setzero)();
   auto cost_chunk_cb = [&](const __mivec bytes, const size_t bytes_in_vec)
-      FORCE_INLINE {
+      FORCE_INLINE_LAMBDA {
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
     auto use_lowhi = _mm(cmpgt_epi8)(
@@ -1020,7 +1022,7 @@ static void EncodeOneRow(size_t bytes_per_line,
   };
 
   auto encode_chunk_cb = [&](const __mivec bytes,
-                             const size_t bytes_in_vec) FORCE_INLINE {
+                             const size_t bytes_in_vec) FORCE_INLINE_LAMBDA {
     auto maskv = _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec));
 
     auto data_for_lut = _mmsi(and)(_mm(set1_epi8)(0xF), bytes);
@@ -1087,7 +1089,7 @@ static void EncodeOneRow(size_t bytes_per_line,
     }
   };
 
-  auto adler_chunk_cb = [&](const __mivec pdata, const size_t bytes_in_vec) FORCE_INLINE {
+  auto adler_chunk_cb = [&](const __mivec pdata, const size_t bytes_in_vec) FORCE_INLINE_LAMBDA {
     len += bytes_in_vec;
 
     adler_accum_s2 = _mm(add_epi32)(
