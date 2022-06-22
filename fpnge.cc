@@ -482,13 +482,8 @@ static uint32_t hadd(__mivec v) {
 #else
       v;
 #endif
-  auto hi = _mm_unpackhi_epi64(sum, sum);
-
-  sum = _mm_add_epi32(hi, sum);
-  hi = _mm_shuffle_epi32(sum, 0xB1);
-
-  sum = _mm_add_epi32(sum, hi);
-
+  sum = _mm_hadd_epi32(sum, sum);
+  sum = _mm_hadd_epi32(sum, sum);
   return _mm_cvtsi128_si32(sum);
 }
 
@@ -1005,11 +1000,15 @@ static void EncodeOneRow(size_t bytes_per_line,
 
   auto adler_accum_s1 = INT2VEC(s1);
   auto adler_accum_s2 = INT2VEC(s2);
+  auto adler_s1_sum = _mmsi(setzero)();
 
-  size_t last_adler_flush = 0;
-  uint16_t len = 1;
+  uint16_t bytes_since_flush = 1;
 
   auto flush_adler = [&]() {
+    adler_accum_s2 = _mm(add_epi32)(adler_accum_s2,
+                                    _mm(slli_epi32)(adler_s1_sum, SIMD_WIDTH == 32 ? 5 : 4));
+    adler_s1_sum = _mmsi(setzero)();
+    
     uint32_t ls1 = hadd(adler_accum_s1);
     uint32_t ls2 = hadd(adler_accum_s2);
     ls1 %= kAdler32Mod;
@@ -1018,7 +1017,7 @@ static void EncodeOneRow(size_t bytes_per_line,
     s2 = ls2;
     adler_accum_s1 = INT2VEC(s1);
     adler_accum_s2 = INT2VEC(s2);
-    last_adler_flush = len;
+    bytes_since_flush = 0;
   };
 
   auto encode_chunk_cb = [&](const __mivec bytes,
@@ -1090,13 +1089,17 @@ static void EncodeOneRow(size_t bytes_per_line,
   };
 
   auto adler_chunk_cb = [&](const __mivec pdata, const size_t bytes_in_vec) FORCE_INLINE_LAMBDA {
-    len += bytes_in_vec;
-
-    adler_accum_s2 = _mm(add_epi32)(
-        _mm(mullo_epi32)(_mm(set1_epi32)(bytes_in_vec), adler_accum_s1),
-        adler_accum_s2);
-
-    auto bytes = _mmsi(and)(pdata, _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec)));
+    bytes_since_flush += bytes_in_vec;
+    auto bytes = pdata;
+    
+    if (bytes_in_vec < SIMD_WIDTH) {
+      adler_accum_s2 = _mm(add_epi32)(
+          _mm(mul_epu32)(_mm(set1_epi32)(bytes_in_vec), adler_accum_s1),
+          adler_accum_s2);
+      bytes = _mmsi(and)(bytes, _mmsi(loadu)((__mivec *)(kMaskVec - bytes_in_vec)));
+    } else {
+      adler_s1_sum = _mm(add_epi32)(adler_s1_sum, adler_accum_s1);
+    }
 
     adler_accum_s1 = _mm(add_epi32)(
         adler_accum_s1, _mm(sad_epu8)(bytes, _mmsi(setzero)()));
@@ -1111,7 +1114,7 @@ static void EncodeOneRow(size_t bytes_per_line,
     adler_accum_s2 = _mm(add_epi32)(
         adler_accum_s2, _mm(madd_epi16)(bytesmuls, _mm(set1_epi16)(1)));
 
-    if (len >= 5500 + last_adler_flush) {
+    if (bytes_since_flush >= 5500) {
       flush_adler();
     }
   };
