@@ -894,9 +894,13 @@ static FORCE_INLINE void WriteBitsShort(__mivec nbits, __mivec bits,
   bits_32_hi =
       _mm(sllv_epi32)(bits_32_hi, nbits_32_lo);
 # else
+  // need to avoid overflow when converting float -> int, because it converts to a signed int
+  // do this by offsetting the shift by 1
+  nbits_32_lo = _mm(sub_epi32)(nbits_32_lo, _mm(set1_epi32)(1));
   bits_32_hi = _mm_castps_si128(_mm(cvtepi32_ps)(bits_32_hi));
   bits_32_hi = _mm(add_epi32)(bits_32_hi, _mm(slli_epi32)(nbits_32_lo, 23));
   bits_32_hi = _mm(cvtps_epi32)(_mm_castsi128_ps(bits_32_hi));
+  bits_32_hi = _mm(add_epi32)(bits_32_hi, bits_32_hi);
 # endif
   nbits = _mm(madd_epi16)(nbits, _mm(set1_epi16)(1));
   bits = _mmsi(or)(bits_32_lo, bits_32_hi);
