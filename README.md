@@ -14,6 +14,8 @@ Limitations:
 * No runtime CPU detection available (relies on compiler targeting, i.e. `-march=native`)
 * Doesn’t support indexed colour or bit depths below 8 bits
 
+Python bindings for fpnge are [available here](http://github.com/animetosho/python-fpnge).
+
 ## Original README
 
 This is a proof-of-concept fast PNG encoder that uses AVX2 and a special
