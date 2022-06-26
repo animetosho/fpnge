@@ -5,7 +5,7 @@ This fork introduces the following to the original project:
 
 * Support for SSE4.1 instead of AVX2, to support a wider range of CPUs
   * Currently PCLMULQDQ is still required until fallback CRC32 is added
-* Around 50% faster performance (under AVX2)
+* Improved performance
 * API changed slightly to allow custom memory allocators
 
 Limitations:
@@ -15,6 +15,12 @@ Limitations:
 * Doesn’t support indexed colour or bit depths below 8 bits
 
 Python bindings for fpnge are [available here](http://github.com/animetosho/python-fpnge).
+
+### See Also
+
+* [FJXL and FPNGE overview slides](https://www.lucaversari.it/FJXL_and_FPNGE.pdf) by Luca Versari
+* [Benchmark comparison with original fpnge](https://twitter.com/jonsneyers/status/1483000547934449668) by Jon Sneyers
+* [fpng](https://github.com/richgel999/fpng), the other speed optimised PNG encoder, by Richard Geldreich
 
 ## Original README
 
