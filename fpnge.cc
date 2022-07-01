@@ -92,13 +92,19 @@ struct HuffmanTable {
   uint16_t end_bits;
 
   alignas(16) uint8_t first16_nbits[16];
-  alignas(16) uint8_t first16_bits[16];
+  alignas(16) uint8_t first16_bits_lo[16];
+  alignas(16) uint8_t first16_bits_hi[16];
 
   alignas(16) uint8_t last16_nbits[16];
-  alignas(16) uint8_t last16_bits[16];
+  alignas(16) uint8_t last16_bits_lo[16];
+  alignas(16) uint8_t last16_bits_hi[16];
 
-  alignas(16) uint8_t mid_lowbits[16];
+  alignas(16) uint8_t mid_bits_lo[16];
+  alignas(16) uint8_t mid_bits_hi[16];
+  alignas(16) uint8_t mid_bits_suffix_lo[16];
+  alignas(16) uint8_t mid_bits_suffix_hi[16];
   uint8_t mid_nbits;
+  uint8_t mid_bits_offset;
 
   uint32_t lz77_length_nbits[259] = {};
   uint32_t lz77_length_bits[259] = {};
@@ -170,64 +176,70 @@ struct HuffmanTable {
         1,   1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
     };
 
-    uint64_t data[286];
-
-    for (size_t i = 0; i < 286; i++) {
-      data[i] = collected_data[i] + kBaselineData[i];
-    }
-
     // Compute Huffman code length ensuring that all the "fake" symbols for [16,
-    // 240) and [255, 285) have their maximum length.
-    uint64_t collapsed_data[16 + 14 + 16 + 2] = {};
-    uint8_t collapsed_min_limit[16 + 14 + 16 + 2] = {};
-    uint8_t collapsed_max_limit[16 + 14 + 16 + 2];
-    for (size_t i = 0; i < 48; i++) {
-      collapsed_max_limit[i] = 8;
+    // 240) and 256 have their maximum length.
+    constexpr int COLLAPSED_SIZE = 16 + 14 + 16 + 30;
+    uint64_t collapsed_data[COLLAPSED_SIZE] = {};
+    uint8_t collapsed_min_limit[COLLAPSED_SIZE] = {};
+    uint8_t collapsed_max_limit[COLLAPSED_SIZE];
+    for (size_t i = 0; i < sizeof(collapsed_min_limit); i++) {
+      collapsed_min_limit[i] = 1;
+      collapsed_max_limit[i] = 15;
     }
+    // 0-15
     for (size_t i = 0; i < 16; i++) {
-      collapsed_data[i] = data[i];
+      collapsed_data[i] = collected_data[i] + kBaselineData[i];
     }
-    for (size_t i = 0; i < 14; i++) {
-      collapsed_data[16 + i] = 1;
-      collapsed_min_limit[16 + i] = 8 * 0;
+    // 16-239 - make all symbols have same probability
+    uint64_t mid_count = 0;
+    for (size_t i = 16; i < 240; i++) {
+      mid_count += collected_data[i] + kBaselineData[i];
     }
-    for (size_t j = 0; j < 16; j++) {
-      collapsed_data[16 + 14 + j] += data[240 + j];
+    mid_count /= 240 - 16;
+    for (size_t i = 16; i < 16 + 14; i++) {
+      collapsed_data[i] = mid_count;
+      collapsed_max_limit[i] = 11; // need space for +4 bits; TODO: see if can remove this limit
     }
-    collapsed_data[16 + 14 + 16] = 1;
-    collapsed_min_limit[16 + 14 + 16] = 8 * 0;
-    collapsed_data[16 + 14 + 16 + 1] = data[285];
+    // 240-285
+    for (size_t j = 0; j < 16 + 30; j++) {
+      collapsed_data[16 + 14 + j] = collected_data[240 + j] + kBaselineData[240 + j];
+    }
 
-    uint8_t collapsed_nbits[48] = {};
-    ComputeCodeLengths(collapsed_data, 48, collapsed_min_limit,
+    uint8_t collapsed_nbits[COLLAPSED_SIZE] = {};
+    ComputeCodeLengths(collapsed_data, sizeof(collapsed_nbits), collapsed_min_limit,
                        collapsed_max_limit, collapsed_nbits);
-
-    // Compute "extra" code lengths for symbols >= 256, except 285.
-    uint8_t tail_nbits[29] = {};
-    uint8_t tail_min_limit[29] = {};
-    uint8_t tail_max_limit[29] = {};
-    for (size_t i = 0; i < 29; i++) {
-      tail_min_limit[i] = 4;
-      tail_max_limit[i] = 7;
+    
+    // ensure the mid symbols all have the same length
+    // TODO: think of a better way to do this - for now, just check and recalculate
+    uint8_t max_mid_nbits = collapsed_nbits[16];
+    bool recalc = false;
+    for (size_t i = 1; i < 14; i++) {
+      if (collapsed_nbits[16 + i] != max_mid_nbits) {
+        max_mid_nbits = std::max(max_mid_nbits, collapsed_nbits[16 + i]);
+        recalc = true;
+      }
     }
-    ComputeCodeLengths(data + 256, 29, tail_min_limit, tail_max_limit,
-                       tail_nbits);
-
+    if (recalc) {
+      for (size_t i = 16; i < 16 + 14; i++) {
+        collapsed_min_limit[i] = max_mid_nbits;
+        collapsed_max_limit[i] = max_mid_nbits;
+      }
+      ComputeCodeLengths(collapsed_data, sizeof(collapsed_nbits), collapsed_min_limit,
+                         collapsed_max_limit, collapsed_nbits);
+    }
+    
     for (size_t i = 0; i < 16; i++) {
       nbits[i] = collapsed_nbits[i];
     }
+
     for (size_t i = 0; i < 14; i++) {
       for (size_t j = 0; j < 16; j++) {
         nbits[(i + 1) * 16 + j] = collapsed_nbits[16 + i] + 4;
       }
     }
-    for (size_t i = 0; i < 16; i++) {
+    for (size_t i = 0; i < 16 + 30; i++) {
       nbits[240 + i] = collapsed_nbits[30 + i];
     }
-    for (size_t i = 0; i < 29; i++) {
-      nbits[256 + i] = collapsed_nbits[46] + tail_nbits[i];
-    }
-    nbits[285] = collapsed_nbits[47];
   }
 
   void ComputeCanonicalCode(const uint8_t *nbits, uint16_t *bits) {
@@ -252,21 +264,38 @@ struct HuffmanTable {
     ComputeCanonicalCode(nbits, bits);
     for (size_t i = 0; i < 16; i++) {
       first16_nbits[i] = nbits[i];
-      first16_bits[i] = bits[i];
+      first16_bits_lo[i] = bits[i] & 0xff;
+      first16_bits_hi[i] = bits[i] >> 8;
     }
     for (size_t i = 0; i < 16; i++) {
       last16_nbits[i] = nbits[240 + i];
-      last16_bits[i] = bits[240 + i];
+      last16_bits_lo[i] = bits[240 + i] & 0xff;
+      last16_bits_hi[i] = bits[240 + i] >> 8;
     }
     mid_nbits = nbits[16];
-    mid_lowbits[0] = mid_lowbits[15] = 0;
+    assert(mid_nbits >= 8); // 224 symbols cannot fit into 7 bits
+    mid_bits_offset = kBitReverseNibbleLookup[bits[16] >> (mid_nbits - 4)];
+    mid_bits_lo[0] = mid_bits_hi[0] = 0;
+    auto mid_bits = BitReverse(mid_nbits, (BitReverse(mid_nbits, bits[16]) + 240 - 16) & ~0xf);
+    mid_bits_lo[15] = mid_bits & 0xff;
+    mid_bits_hi[15] = mid_bits >> 8;
     for (size_t i = 16; i < 240; i += 16) {
-      mid_lowbits[i / 16] = bits[i] & ((1U << (mid_nbits - 4)) - 1);
+      mid_bits = bits[i] & ((1U << (mid_nbits - 4)) - 1);
+      mid_bits_lo[i / 16] = mid_bits & 0xff;
+      mid_bits_hi[i / 16] = mid_bits >> 8;
+    }
+    for (size_t i = 0; i < 16; i++) {
+      mid_bits = kBitReverseNibbleLookup[i] << (mid_nbits - 4);
+      mid_bits_suffix_lo[i] = mid_bits & 0xff;
+      mid_bits_suffix_hi[i] = mid_bits >> 8;
     }
     for (size_t i = 16; i < 240; i++) {
       assert(nbits[i] == mid_nbits);
-      assert((uint32_t(mid_lowbits[i / 16]) |
-              (kBitReverseNibbleLookup[i % 16] << (mid_nbits - 4))) == bits[i]);
+      auto idx_hi = (i + mid_bits_offset) / 16;
+      auto idx_lo = (i + mid_bits_offset) % 16;
+      (void)idx_hi; (void)idx_lo;
+      assert((uint32_t(mid_bits_lo[idx_hi] | mid_bits_suffix_lo[idx_lo]) |
+             (uint32_t(mid_bits_hi[idx_hi] | mid_bits_suffix_hi[idx_lo]) << 8)) == bits[i]);
     }
     end_bits = bits[256];
     // Construct lz77 lookup tables.
@@ -290,6 +319,13 @@ struct BitWriter {
     bits_in_buffer &= 7;
     buffer >>= bytes_in_buffer * 8;
     bytes_written += bytes_in_buffer;
+  }
+  
+  // requires 0 <= sym < 16
+  void WriteLowSym(const HuffmanTable &table, int sym) {
+    assert(sym >= 0 && sym < 16);
+    
+    Write(table.first16_nbits[sym], table.first16_bits_lo[sym] | (table.first16_bits_hi[sym] << 8));
   }
 
   void ZeroPadToByte() {
@@ -674,7 +710,6 @@ TryPredictor(size_t bytes_per_line, const unsigned char *current_row_buf,
 }
 
 static FORCE_INLINE void WriteBits(MIVEC nbits, MIVEC bits_lo, MIVEC bits_hi,
-                                   size_t mid_lo_nbits,
                                    BitWriter *__restrict writer) {
 
 #if defined(__BMI2__) && defined(PLATFORM_AMD64) &&                            \
@@ -689,12 +724,12 @@ static FORCE_INLINE void WriteBits(MIVEC nbits, MIVEC bits_lo, MIVEC bits_hi,
 #endif
 
   // Merge bits_lo and bits_hi in 16-bit "bits".
-#ifdef USE_PEXT
   auto bits0 = MM(unpacklo_epi8)(bits_lo, bits_hi);
   auto bits1 = MM(unpackhi_epi8)(bits_lo, bits_hi);
 
+#ifdef USE_PEXT
   // convert nbits into a mask
-  auto nbits_hi = MM(sub_epi8)(nbits, MM(set1_epi8)(mid_lo_nbits));
+  auto nbits_hi = MM(sub_epi8)(nbits, MM(set1_epi8)(8));
   auto nbits0 = MM(unpacklo_epi8)(nbits, nbits_hi);
   auto nbits1 = MM(unpackhi_epi8)(nbits, nbits_hi);
   const auto nbits_to_mask =
@@ -735,19 +770,6 @@ static FORCE_INLINE void WriteBits(MIVEC nbits, MIVEC bits_lo, MIVEC bits_hi,
       nbits,
       BCAST128(_mm_set_epi32(0x0f070e06, 0x0d050c04, 0x0b030a02, 0x09010800)));
 #endif
-  MIVEC bits0, bits1;
-  if (mid_lo_nbits == 8) {
-    bits0 = MM(unpacklo_epi8)(bits_lo, bits_hi);
-    bits1 = MM(unpackhi_epi8)(bits_lo, bits_hi);
-  } else {
-    auto nbits_shift = _mm_cvtsi32_si128(8 - mid_lo_nbits);
-    auto bits_lo_shifted = MM(sll_epi16)(bits_lo, nbits_shift);
-    bits0 = MM(unpacklo_epi8)(bits_lo_shifted, bits_hi);
-    bits1 = MM(unpackhi_epi8)(bits_lo_shifted, bits_hi);
-
-    bits0 = MM(srl_epi16)(bits0, nbits_shift);
-    bits1 = MM(srl_epi16)(bits1, nbits_shift);
-  }
 
   // 16 -> 32
   auto nbits0_32_lo = MMSI(and)(nbits_mix, MM(set1_epi32)(0xff));
@@ -843,10 +865,17 @@ static FORCE_INLINE void WriteBits(MIVEC nbits, MIVEC bits_lo, MIVEC bits_hi,
 
   for (size_t ii = 0; ii < SIMD_WIDTH / 4; ii++) {
     uint64_t bits = bits_a[kPerm[ii]];
+    auto nbits = nbits_a[kPerm[ii]];
 #ifdef USE_PEXT
     bits = _pext_u64(bits, bitmask_a[kPerm[ii]]);
 #endif
-    writer->Write(nbits_a[kPerm[ii]], bits);
+    if (nbits + writer->bits_in_buffer > 63) {
+      // hope this case rarely occurs
+      writer->Write(16, bits & 0xffff);
+      bits >>= 16;
+      nbits -= 16;
+    }
+    writer->Write(nbits, bits);
   }
 }
 
@@ -994,7 +1023,7 @@ EncodeOneRow(size_t bytes_per_line, const unsigned char *current_row_buf,
   uint8_t predictor = FPNGE_FIXED_PREDICTOR;
 #endif
 
-  writer->Write(table.first16_nbits[predictor], table.first16_bits[predictor]);
+  writer->WriteLowSym(table, predictor);
   UpdateAdler32(s1, s2, predictor);
 
   auto adler_accum_s1 = INT2VEC(s1);
@@ -1024,8 +1053,8 @@ EncodeOneRow(size_t bytes_per_line, const unsigned char *current_row_buf,
     auto maskv = MMSI(loadu)((MIVEC *)(kMaskVec - bytes_in_vec));
 
     auto data_for_lut = MMSI(and)(MM(set1_epi8)(0xF), bytes);
-    // get a mask of `bytes` that are between -16 and 15 inclusive
-    // (`-16 <= bytes <= 15` is equivalent to `bytes + 112 > 95`)
+    // get a mask of `bytes` that are between 16 and 239 inclusive
+    // (`16 <= bytes <= 239` is equivalent to `96 > bytes + 112`)
     auto use_mid = MM(cmpgt_epi8)(MM(set1_epi8)(96),
                                   MM(add_epi8)(bytes, MM(set1_epi8)(112)));
     auto nbits_low16 = MM(shuffle_epi8)(
@@ -1033,45 +1062,77 @@ EncodeOneRow(size_t bytes_per_line, const unsigned char *current_row_buf,
     auto nbits_hi16 = MM(shuffle_epi8)(
         BCAST128(_mm_load_si128((__m128i *)table.last16_nbits)), data_for_lut);
 
-    auto bits_low16 = MM(shuffle_epi8)(
-        BCAST128(_mm_load_si128((__m128i *)table.first16_bits)), data_for_lut);
-    auto bits_hi16 = MM(shuffle_epi8)(
-        BCAST128(_mm_load_si128((__m128i *)table.last16_bits)), data_for_lut);
+    auto bits_low16_lo = MM(shuffle_epi8)(
+        BCAST128(_mm_load_si128((__m128i *)table.first16_bits_lo)), data_for_lut);
+    auto bits_hi16_lo = MM(shuffle_epi8)(
+        BCAST128(_mm_load_si128((__m128i *)table.last16_bits_lo)), data_for_lut);
 
-    if (MM(movemask_epi8)(use_mid)) {
-      auto data_for_midlut =
-          MMSI(and)(MM(set1_epi8)(0xF), MM(srai_epi16)(bytes, 4));
+    auto nbits =
+        MM(blendv_epi8)(MM(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
+                        MM(set1_epi8)(table.mid_nbits), use_mid);
+    nbits = MMSI(and)(nbits, maskv);
 
+    if (MM(movemask_epi8)(MM(cmpgt_epi8)(nbits, MM(set1_epi8)(8)))) {
+      // we have to deal with nbits > 8, i.e. high parts
+      auto data_for_midlut = MM(add_epi8)(bytes, MM(set1_epi8)(table.mid_bits_offset));
+      auto data_for_midlut_lo =
+          MMSI(and)(MM(set1_epi8)(0xF), MM(srai_epi16)(data_for_midlut, 4));
+      auto data_for_midlut_hi = MMSI(and)(MM(set1_epi8)(0xF), data_for_midlut);
+      
       auto bits_mid_lo = MM(shuffle_epi8)(
-          BCAST128(_mm_load_si128((__m128i *)table.mid_lowbits)),
-          data_for_midlut);
-
+          BCAST128(_mm_load_si128((__m128i *)table.mid_bits_lo)),
+          data_for_midlut_lo);
       auto bits_mid_hi = MM(shuffle_epi8)(
-          BCAST128(_mm_load_si128((__m128i *)kBitReverseNibbleLookup)),
-          data_for_lut);
-
-      auto nbits =
-          MM(blendv_epi8)(MM(blendv_epi8)(nbits_low16, nbits_hi16, bytes),
-                          MM(set1_epi8)(table.mid_nbits), use_mid);
-      nbits = MMSI(and)(nbits, maskv);
+          BCAST128(_mm_load_si128((__m128i *)table.mid_bits_suffix_hi)),
+          data_for_midlut_hi);
+      
+      if (table.mid_nbits > 12) { // likely
+        bits_mid_hi = MMSI(or)(bits_mid_hi, MM(shuffle_epi8)(
+            BCAST128(_mm_load_si128((__m128i *)table.mid_bits_hi)),
+            data_for_midlut_lo));
+      } else {
+        bits_mid_lo = MMSI(or)(bits_mid_lo, MM(shuffle_epi8)(
+            BCAST128(_mm_load_si128((__m128i *)table.mid_bits_suffix_lo)),
+            data_for_midlut_hi));
+      }
 
       auto bits_lo = MM(blendv_epi8)(
-          MM(blendv_epi8)(bits_low16, bits_hi16, bytes), bits_mid_lo, use_mid);
+          MM(blendv_epi8)(bits_low16_lo, bits_hi16_lo, bytes), bits_mid_lo, use_mid);
+
+      auto bits_low16_hi = MM(shuffle_epi8)(
+          BCAST128(_mm_load_si128((__m128i *)table.first16_bits_hi)), data_for_lut);
+      auto bits_hi16_hi = MM(shuffle_epi8)(
+          BCAST128(_mm_load_si128((__m128i *)table.last16_bits_hi)), data_for_lut);
+
+      auto bits_hi = MM(blendv_epi8)(
+          MM(blendv_epi8)(bits_low16_hi, bits_hi16_hi, bytes), bits_mid_hi, use_mid);
 
       // need to mask out unused hi bits because WriteBits uses OR operations to
       // merge data (this might not be needed in PEXT variant)
-      auto bits_hi = MMSI(and)(use_mid, bits_mid_hi);
       bits_lo = MMSI(and)(bits_lo, maskv);
       bits_hi = MMSI(and)(bits_hi, maskv);
 
-      WriteBits(nbits, bits_lo, bits_hi, table.mid_nbits - 4, writer);
+      WriteBits(nbits, bits_lo, bits_hi, writer);
     } else {
       // mid never used - we can make some shortcuts
-      auto nbits = MM(blendv_epi8)(nbits_low16, nbits_hi16, bytes);
-      auto bits_lo = MM(blendv_epi8)(bits_low16, bits_hi16, bytes);
-      nbits = MMSI(and)(nbits, maskv);
-      bits_lo = MMSI(and)(bits_lo, maskv);
+      auto bits_lo = MM(blendv_epi8)(bits_low16_lo, bits_hi16_lo, bytes);
+      
+      if (table.mid_nbits == 8) { // highly unlikely
+        auto data_for_midlut = MM(add_epi8)(bytes, MM(set1_epi8)(table.mid_bits_offset));
+        auto data_for_midlut_lo =
+            MMSI(and)(MM(set1_epi8)(0xF), MM(srai_epi16)(data_for_midlut, 4));
+        auto data_for_midlut_hi = MMSI(and)(MM(set1_epi8)(0xF), data_for_midlut);
+        
+        auto bits_mid_lo = MM(shuffle_epi8)(
+            BCAST128(_mm_load_si128((__m128i *)table.mid_bits_lo)),
+            data_for_midlut_lo);
+        bits_mid_lo = MMSI(or)(bits_mid_lo, MM(shuffle_epi8)(
+            BCAST128(_mm_load_si128((__m128i *)table.mid_bits_suffix_lo)),
+            data_for_midlut_hi));
+        bits_lo = MM(blendv_epi8)(bits_lo, bits_mid_lo, use_mid);
+      }
 
+      bits_lo = MMSI(and)(bits_lo, maskv);
       WriteBitsShort(nbits, bits_lo, writer);
     }
   };
@@ -1110,7 +1171,7 @@ EncodeOneRow(size_t bytes_per_line, const unsigned char *current_row_buf,
   };
 
   auto encode_rle_cb = [&](size_t run) {
-    writer->Write(table.first16_nbits[0], table.first16_bits[0]);
+    writer->WriteLowSym(table, 0);
     ForAllRLESymbols(run, [&](size_t len, size_t count) {
       uint32_t bits = (dist_bits << table.lz77_length_nbits[len]) |
                       table.lz77_length_bits[len];
