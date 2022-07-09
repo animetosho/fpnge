@@ -22,8 +22,11 @@ CXX=clang++
 [ -f lodepng.h ] || wget https://raw.githubusercontent.com/lvandeve/lodepng/8c6a9e30576f07bf470ad6f09458a2dcd7a6a84a/lodepng.h
 [ -f lodepng.o ] || $CXX lodepng.cpp -O3 -o lodepng.o -c
 
+$CXX -O3 -c -msse4.1 -mpclmul -g -Wall ../crc32_clmul.cc -o crc32_clmul.o
+$CXX -O3 -c -g -Wall ../crc32_slicing.cc -o crc32_slicing.o
+
 $CXX -O3 -march=native -g -Wall "$@" \
-  -I. lodepng.o \
+  -I. lodepng.o crc32_clmul.o crc32_slicing.o \
   ../fpnge.cc ../fpnge_main.cc \
   -o fpnge
 
