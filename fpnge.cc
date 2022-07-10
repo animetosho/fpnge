@@ -25,6 +25,7 @@
 #define FORCE_INLINE_LAMBDA [[msvc::forceinline]]
 #define FORCE_INLINE __forceinline
 #define __SSE4_1__ 1
+#define __PCLMUL__ 1
 #ifdef __AVX2__
 #define __BMI2__ 1
 #endif
@@ -1018,7 +1019,7 @@ static void AppendBE32(size_t value, BitWriter *__restrict writer) {
   writer->Write(8, value & 0xFF);
 }
 
-static ICrc32 *(*CreateCRC32)() =
+static constexpr ICrc32 *(*CreateCRC32)() =
 #ifdef __PCLMUL__
     Crc32Clmul::create
 #else
