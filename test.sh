@@ -21,6 +21,14 @@ run_default() {
   ./build/fpnge "$@"
 }
 
+prepare_sadpred() {
+  ./build.sh -DFPNGE_SAD_PREDICTOR=1
+}
+
+run_sadpred() {
+  ./build/fpnge "$@"
+}
+
 prepare_fast() {
   ./build.sh -DFPNGE_FIXED_PREDICTOR=4
 }
@@ -54,7 +62,7 @@ run_testcase() {
 }
 
 
-for SETTING in default fast superfast
+for SETTING in default sadpred fast superfast
 do
   prepare_$SETTING
   for FILE in testdata/terminal.png $(find jxl_testdata -name '*.png')
