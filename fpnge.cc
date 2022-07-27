@@ -96,6 +96,10 @@ struct HuffmanTable {
   uint8_t nbits[286];
   uint16_t end_bits;
 
+#if defined(FPNGE_SAD_PREDICTOR) && FPNGE_SAD_PREDICTOR == 2
+  alignas(16) uint8_t nbits_estimate[16];
+#endif
+
   alignas(16) uint8_t first16_nbits[16];
   alignas(16) uint8_t first16_bits[16];
 
@@ -283,6 +287,15 @@ struct HuffmanTable {
             bits[257 + i] | (j << nbits[257 + i]);
       }
     }
+
+#if defined(FPNGE_SAD_PREDICTOR) && FPNGE_SAD_PREDICTOR == 2
+    nbits_estimate[0] =
+        nbits[0] - 1; // subtract 1 as a fudge for catering for RLE
+    for (size_t i = 1; i < 15; i++) {
+      nbits_estimate[i] = (nbits[i] + nbits[256 - i] + 1) / 2;
+    }
+    nbits_estimate[15] = mid_nbits;
+#endif
   }
 };
 
@@ -727,25 +740,47 @@ template <typename CB> static void ForAllRLESymbols(size_t length, CB &&cb) {
 }
 
 #ifdef FPNGE_SAD_PREDICTOR
+static FORCE_INLINE MIVEC SADCostVec(MIVEC data, MIVEC pred, MIVEC bit_costs) {
+#if FPNGE_SAD_PREDICTOR == 2
+  auto absdiff = MM(abs_epi8)(MM(sub_epi8)(pred, data));
+  // limit to 16 symbols
+  absdiff = MM(min_epu8)(absdiff, MM(set1_epi8)(15));
+  auto costs = MM(shuffle_epi8)(bit_costs, absdiff);
+  return MM(sad_epu8)(costs, MMSI(setzero)());
+#else
+  (void)bit_costs;
+  return MM(sad_epu8)(pred, data);
+#endif
+}
+
 static uint8_t
 BestSADPredictor(size_t bytes_per_line, const unsigned char *current_row_buf,
                  const unsigned char *top_buf, const unsigned char *left_buf,
-                 const unsigned char *topleft_buf, unsigned char *paeth_data) {
+                 const unsigned char *topleft_buf, unsigned char *paeth_data,
+                 const HuffmanTable *table) {
   size_t i = 0;
+  auto bit_costs = MMSI(undefined)();
   auto cost1 = MMSI(setzero)();
   auto cost2 = MMSI(setzero)();
   auto cost3 = MMSI(setzero)();
   auto cost4 = MMSI(setzero)();
+#if FPNGE_SAD_PREDICTOR == 2
+  if (table)
+    bit_costs = BCAST128(_mm_load_si128((__m128i *)(table->nbits_estimate)));
+  else
+    bit_costs =
+        BCAST128(_mm_set_epi8(12, 8, 8, 8, 8, 8, 8, 7, 7, 6, 6, 5, 5, 4, 3, 1));
+#endif
   for (; i + SIMD_WIDTH <= bytes_per_line; i += SIMD_WIDTH) {
     auto data = MMSI(load)((MIVEC *)(current_row_buf + i));
     auto pred1 = GetPredictor<1>(top_buf + i, left_buf + i);
     auto pred2 = GetPredictor<2>(top_buf + i, left_buf + i);
     auto pred3 = GetPredictor<3>(top_buf + i, left_buf + i);
     auto pred4 = GetPredictor<4>(top_buf + i, left_buf + i, topleft_buf + i);
-    cost1 = MM(add_epi64)(cost1, MM(sad_epu8)(data, pred1));
-    cost2 = MM(add_epi64)(cost2, MM(sad_epu8)(data, pred2));
-    cost3 = MM(add_epi64)(cost3, MM(sad_epu8)(data, pred3));
-    cost4 = MM(add_epi64)(cost4, MM(sad_epu8)(data, pred4));
+    cost1 = MM(add_epi64)(cost1, SADCostVec(data, pred1, bit_costs));
+    cost2 = MM(add_epi64)(cost2, SADCostVec(data, pred2, bit_costs));
+    cost3 = MM(add_epi64)(cost3, SADCostVec(data, pred3, bit_costs));
+    cost4 = MM(add_epi64)(cost4, SADCostVec(data, pred4, bit_costs));
     MMSI(store)((MIVEC *)(paeth_data + i), pred4);
   }
   // worth considering: the last vector can probably be skipped for being not so
@@ -762,14 +797,14 @@ BestSADPredictor(size_t bytes_per_line, const unsigned char *current_row_buf,
     auto maskv = MMSI(loadu)((MIVEC *)(kMaskVec - bytes_remaining));
     // data and pred2 doesn't need to be masked, because the buffer is
     // zero-filled
-    pred1 = MMSI(and)(pred1, maskv);
-    pred3 = MMSI(and)(pred3, maskv);
-    pred4 = MMSI(and)(pred4, maskv);
+    pred1 = MMSI(andnot)(maskv, pred1);
+    pred3 = MMSI(andnot)(maskv, pred3);
+    pred4 = MMSI(andnot)(maskv, pred4);
 
-    cost1 = MM(add_epi64)(cost1, MM(sad_epu8)(data, pred1));
-    cost2 = MM(add_epi64)(cost2, MM(sad_epu8)(data, pred2));
-    cost3 = MM(add_epi64)(cost3, MM(sad_epu8)(data, pred3));
-    cost4 = MM(add_epi64)(cost4, MM(sad_epu8)(data, pred4));
+    cost1 = MM(add_epi64)(cost1, SADCostVec(data, pred1, bit_costs));
+    cost2 = MM(add_epi64)(cost2, SADCostVec(data, pred2, bit_costs));
+    cost3 = MM(add_epi64)(cost3, SADCostVec(data, pred3, bit_costs));
+    cost4 = MM(add_epi64)(cost4, SADCostVec(data, pred4, bit_costs));
 
     MMSI(store)((MIVEC *)(paeth_data + i), pred4);
   }
@@ -1099,8 +1134,9 @@ static void EncodeOneRow(size_t bytes_per_line,
                          size_t dist_bits, BitWriter *__restrict writer) {
 #ifndef FPNGE_FIXED_PREDICTOR
 #ifdef FPNGE_SAD_PREDICTOR
-  uint8_t predictor = BestSADPredictor(bytes_per_line, current_row_buf, top_buf,
-                                       left_buf, topleft_buf, paeth_data);
+  uint8_t predictor =
+      BestSADPredictor(bytes_per_line, current_row_buf, top_buf, left_buf,
+                       topleft_buf, paeth_data, &table);
 #else
   uint8_t predictor;
   size_t best_cost = ~0U;
@@ -1294,8 +1330,9 @@ CollectSymbolCounts(size_t bytes_per_line, const unsigned char *current_row_buf,
   };
 
 #ifdef FPNGE_SAD_PREDICTOR
-  uint8_t predictor = BestSADPredictor(bytes_per_line, current_row_buf, top_buf,
-                                       left_buf, topleft_buf, paeth_data);
+  uint8_t predictor =
+      BestSADPredictor(bytes_per_line, current_row_buf, top_buf, left_buf,
+                       topleft_buf, paeth_data, nullptr);
   ProcessRow(predictor, bytes_per_line, current_row_buf, top_buf, left_buf,
              topleft_buf, paeth_data, encode_chunk_cb, adler_chunk_cb,
              encode_rle_cb);
